@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>LANCache Prefill UI</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.css">
+  <style>
+    :root { color-scheme: dark; --bg:#0b1020; --panel:#121a2d; --muted:#93a4bf; --accent:#6ea8fe; }
+    * { box-sizing:border-box }
+    body { margin:0; font-family:Inter,system-ui,sans-serif; background:var(--bg); color:#edf3ff }
+    main { max-width:1200px; margin:auto; padding:24px }
+    header { display:flex; justify-content:space-between; align-items:center; gap:16px; margin-bottom:18px }
+    h1 { margin:0; font-size:1.5rem }
+    .status { padding:8px 12px; border-radius:999px; background:#26324c }
+    .ok { background:#173d2c; color:#9bf0bd }
+    .bad { background:#4a2028; color:#ffb2bd }
+    .panel { background:var(--panel); border:1px solid #26324c; border-radius:14px; padding:16px; margin-bottom:16px }
+    .buttons { display:flex; flex-wrap:wrap; gap:10px }
+    button { border:0; border-radius:10px; padding:11px 14px; background:#263653; color:white; cursor:pointer; font-weight:650 }
+    button.primary { background:var(--accent); color:#07101f }
+    button:hover { filter:brightness(1.1) }
+    #terminal { height:620px; width:100%; }
+    p { color:var(--muted); line-height:1.5 }
+    code { background:#0a1120; padding:2px 6px; border-radius:6px }
+    #output { white-space:pre-wrap; color:#d5e1f7; max-height:220px; overflow:auto }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <h1>LANCache Prefill UI</h1>
+      <p>Browser controls and terminal for SteamPrefill.</p>
+    </div>
+    <div id="status" class="status">Checking…</div>
+  </header>
+
+  <section class="panel">
+    <div class="buttons">
+      <button class="primary" onclick="sendCmd('./SteamPrefill select-apps')">Select games</button>
+      <button class="primary" onclick="sendCmd('./SteamPrefill prefill')">Start prefill</button>
+      <button onclick="runAction('status')">Status</button>
+      <button onclick="runAction('clear-cache')">Clear Steam cache</button>
+      <button onclick="sendCmd('clear')">Clear terminal</button>
+      <button onclick="reconnect()">Reconnect terminal</button>
+    </div>
+    <p>The game picker opens inside the terminal below. Search, tick games and confirm using SteamPrefill’s normal interactive controls.</p>
+    <pre id="output"></pre>
+  </section>
+
+  <section class="panel">
+    <div id="terminal"></div>
+  </section>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.js"></script>
+<script>
+let term, fit, socket;
+
+function connectTerminal() {
+  if (!term) {
+    term = new Terminal({cursorBlink:true, convertEol:true, fontSize:14, scrollback:10000});
+    fit = new FitAddon.FitAddon();
+    term.loadAddon(fit);
+    term.open(document.getElementById('terminal'));
+    fit.fit();
+    term.onData(data => socket?.readyState === WebSocket.OPEN && socket.send(data));
+    window.addEventListener('resize', () => { fit.fit(); resize(); });
+  }
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  socket = new WebSocket(`${proto}://${location.host}/ws/terminal`);
+  socket.binaryType = 'arraybuffer';
+  socket.onopen = () => { term.writeln('\r\n\x1b[32mConnected to SteamPrefill.\x1b[0m'); resize(); };
+  socket.onmessage = e => {
+    if (e.data instanceof ArrayBuffer) term.write(new Uint8Array(e.data));
+    else term.write(e.data);
+  };
+  socket.onclose = () => term.writeln('\r\n\x1b[31mTerminal disconnected.\x1b[0m');
+}
+function resize() {
+  if (socket?.readyState === WebSocket.OPEN) socket.send(`__RESIZE__:${term.cols}:${term.rows}`);
+}
+function reconnect() { try { socket?.close(); } catch {} connectTerminal(); }
+function sendCmd(cmd) {
+  if (socket?.readyState !== WebSocket.OPEN) return alert('Terminal is not connected.');
+  socket.send(cmd + '\r');
+  term.focus();
+}
+async function health() {
+  const r = await fetch('/api/health'); const d = await r.json();
+  const el = document.getElementById('status');
+  el.textContent = d.running ? `${d.target} running` : `${d.target} unavailable`;
+  el.className = `status ${d.running ? 'ok' : 'bad'}`;
+}
+async function runAction(action) {
+  const out = document.getElementById('output');
+  out.textContent = 'Running…';
+  const r = await fetch('/api/action', {method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({action})});
+  const d = await r.json();
+  out.textContent = d.detail || [d.stdout, d.stderr].filter(Boolean).join('\n') || JSON.stringify(d,null,2);
+}
+connectTerminal(); health(); setInterval(health, 15000);
+</script>
+</body>
+</html>

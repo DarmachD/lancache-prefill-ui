@@ -1,0 +1,14 @@
+services:
+  lancache-prefill-ui:
+    build: .
+    container_name: LANCache-Prefill-UI
+    restart: unless-stopped
+    ports:
+      - "8088:8080"
+    environment:
+      TARGET_CONTAINER: LANCache-Prefill
+      PREFILL_DIR: /lancacheprefill/SteamPrefill
+      PREFILL_USER: prefill
+      PORT: "8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock

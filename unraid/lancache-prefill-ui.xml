@@ -1,0 +1,28 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>LANCache-Prefill-UI</Name>
+  <Repository>lancache-prefill-ui:local</Repository>
+  <Registry/>
+  <Network>br1</Network>
+  <MyIP>10.12.20.13</MyIP>
+  <Shell>sh</Shell>
+  <Privileged>false</Privileged>
+  <Support/>
+  <Project/>
+  <Overview>Browser UI and interactive terminal for an existing SteamPrefill container.</Overview>
+  <Category>Network:Other</Category>
+  <WebUI>http://[IP]:[PORT:8080]/</WebUI>
+  <Icon>https://raw.githubusercontent.com/tpill90/steam-lancache-prefill/master/docs/images/SteamPrefill.png</Icon>
+  <ExtraParams/>
+  <PostArgs/>
+  <CPUset/>
+  <DateInstalled/>
+  <DonateText/>
+  <DonateLink/>
+  <Requires>Requires a locally built image and access to /var/run/docker.sock.</Requires>
+  <Config Name="Web UI" Target="8080" Default="8080" Mode="tcp" Description="Web interface port" Type="Port" Display="always" Required="true" Mask="false">8080</Config>
+  <Config Name="Docker socket" Target="/var/run/docker.sock" Default="/var/run/docker.sock" Mode="rw" Description="Allows the UI to execute commands in SteamPrefill" Type="Path" Display="always" Required="true" Mask="false">/var/run/docker.sock</Config>
+  <Config Name="Target container" Target="TARGET_CONTAINER" Default="LANCache-Prefill" Mode="" Description="Existing SteamPrefill container name" Type="Variable" Display="always" Required="true" Mask="false">LANCache-Prefill</Config>
+  <Config Name="SteamPrefill directory" Target="PREFILL_DIR" Default="/lancacheprefill/SteamPrefill" Mode="" Description="SteamPrefill directory inside target container" Type="Variable" Display="always" Required="true" Mask="false">/lancacheprefill/SteamPrefill</Config>
+  <Config Name="SteamPrefill user" Target="PREFILL_USER" Default="prefill" Mode="" Description="User inside target container" Type="Variable" Display="always" Required="true" Mask="false">prefill</Config>
+</Container>

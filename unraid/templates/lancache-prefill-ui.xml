@@ -1,0 +1,22 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>LANCache-Prefill-UI</Name>
+  <Repository>ghcr.io/DarmachD/lancache-prefill-ui:latest</Repository>
+  <Registry>https://github.com/DarmachD/lancache-prefill-ui/pkgs/container/lancache-prefill-ui</Registry>
+  <Network>bridge</Network>
+  <Shell>sh</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/DarmachD/lancache-prefill-ui/issues</Support>
+  <Project>https://github.com/DarmachD/lancache-prefill-ui</Project>
+  <Overview>Browser control panel and interactive SteamPrefill console for an existing LANCache-Prefill container.</Overview>
+  <Category>Network:Other</Category>
+  <WebUI>http://[IP]:[PORT:8080]/</WebUI>
+  <Icon>https://raw.githubusercontent.com/DarmachD/lancache-prefill-ui/main/unraid/images/icon.png</Icon>
+  <Requires>An existing SteamPrefill container. Keep LAN-only because Docker socket access is required.</Requires>
+  <Config Name="Web UI Port" Target="8080" Default="8088" Mode="tcp" Description="Web interface port." Type="Port" Display="always" Required="true" Mask="false">8088</Config>
+  <Config Name="Appdata" Target="/config" Default="/mnt/user/appdata/lancache-prefill-ui" Mode="rw" Description="Persistent app data." Type="Path" Display="advanced-hide" Required="true" Mask="false">/mnt/user/appdata/lancache-prefill-ui</Config>
+  <Config Name="Docker Socket" Target="/var/run/docker.sock" Default="/var/run/docker.sock" Mode="rw" Description="Allows control of the SteamPrefill container." Type="Path" Display="always" Required="true" Mask="false">/var/run/docker.sock</Config>
+  <Config Name="SteamPrefill Container" Target="TARGET_CONTAINER" Default="LANCache-Prefill" Mode="" Description="Existing SteamPrefill container name." Type="Variable" Display="always" Required="true" Mask="false">LANCache-Prefill</Config>
+  <Config Name="SteamPrefill Directory" Target="PREFILL_DIR" Default="/lancacheprefill/SteamPrefill" Mode="" Description="SteamPrefill path inside the target container." Type="Variable" Display="advanced" Required="true" Mask="false">/lancacheprefill/SteamPrefill</Config>
+  <Config Name="SteamPrefill User" Target="PREFILL_USER" Default="prefill" Mode="" Description="User inside the target container." Type="Variable" Display="advanced" Required="true" Mask="false">prefill</Config>
+</Container>
