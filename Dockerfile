@@ -14,7 +14,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     CACHEDECK_VERSION=0.3.0 \
     PORT=8080
 
-RUN RUN apt-get update \
+RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         bash \
         ca-certificates \
