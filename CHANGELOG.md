@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.6.2
+
+- Added a direct fallback to SteamPrefill's `Config/selectedAppsToPrefill.json` when `select-apps status` fails or times out
+- Prevented a single Steam manifest failure from leaving the Games view completely empty
+- Added background Steam app-ID metadata resolution so fallback entries gain proper names and artwork
+- Skipped the manifest-heavy status scan while a real prefill is active, avoiding a competing SteamPrefill process
+- Added a deep current-run log reconciliation after metadata resolution so already completed games appear without restarting the prefill
+- Preserved the last known game library when a later refresh fails
+- Added recognition of SteamPrefill's real `Finished downloading ...` log line so completed games update during an active run
+- Kept transfer sizes honest: they remain unknown when SteamPrefill cannot calculate them
+- Made the Dashboard status action use the same compatibility-safe library refresh path
+- Added parser and persistence tests for selected-app config fallback and real completion logs
+
 ## 0.6.1
 
 - Added selected-library compressed transfer totals and estimated remaining queue size

@@ -29,12 +29,17 @@ from app.library import (
     LibraryResponse,
     LibraryStore,
     QueueStore,
+    SelectedApp,
     build_library_response,
     parse_progress_snapshot,
+    parse_selected_app_ids_config,
     parse_selected_apps_status,
     output_indicates_successful_prefill,
     parse_size_bytes,
+    placeholder_game_name,
+    is_placeholder_game_name,
     resolve_steam_metadata,
+    resolve_steam_metadata_by_id,
 )
 
 APP_NAME: Final = "CacheDeck"
@@ -1110,39 +1115,120 @@ if : > "$probe" 2>/dev/null; then rm -f "$probe"; printf 'state=writeable\\n'; e
     )
 
 
+async def read_selected_app_ids_from_config() -> list[int]:
+    command = r"""
+for candidate in ./Config/selectedAppsToPrefill.json /Config/selectedAppsToPrefill.json; do
+    if [ -r "$candidate" ]; then
+        cat "$candidate"
+        exit 0
+    fi
+done
+exit 44
+""".strip()
+    result = await run_target_command(command, timeout=20)
+    if result.returncode != 0:
+        return []
+    return parse_selected_app_ids_config(result.stdout)
+
+
+def selected_apps_from_ids(app_ids: list[int]) -> list[GameRecord]:
+    existing = {
+        game.app_id: game
+        for game in library_store.list_games()
+        if game.app_id is not None
+    }
+    selected = []
+    for app_id in app_ids:
+        previous = existing.get(app_id)
+        selected.append(
+            SelectedApp(
+                app_id=app_id,
+                name=(previous.name if previous else placeholder_game_name(app_id)),
+                download_size=(previous.download_size if previous else None),
+            )
+        )
+    return library_store.replace_selected(selected, utc_now())
+
+
 async def refresh_selected_library() -> tuple[list[GameRecord], str]:
-    """Refresh CacheDeck's selected-app catalogue from SteamPrefill's own status command."""
+    """Refresh the catalogue without making the Games view depend on Steam manifest availability."""
     try:
-        result = await run_target_command(
+        app_ids = await read_selected_app_ids_from_config()
+    except (OSError, subprocess.TimeoutExpired):
+        app_ids = []
+
+    # The selected-app JSON is the fastest and most reliable source of the library itself.
+    # Avoid launching a second SteamPrefill process while a real prefill is active.
+    if app_ids:
+        games = selected_apps_from_ids(app_ids)
+        start_metadata_refresh()
+        try:
+            running = (await get_raw_prefill_status()).running
+        except Exception:
+            running = False
+        if running:
+            return games, (
+                f"Loaded {len(games)} selected apps directly from SteamPrefill's saved config. "
+                "The manifest-heavy size scan was skipped while a prefill is running. "
+                "Names, artwork and completed games are being reconstructed in the background."
+            )
+
+    status_result: subprocess.CompletedProcess[str] | None = None
+    status_error = ""
+    try:
+        status_result = await run_target_command(
             "./SteamPrefill select-apps status --no-ansi",
             timeout=300,
         )
-    except subprocess.TimeoutExpired as exc:
-        raise HTTPException(
-            status_code=504,
-            detail="SteamPrefill did not return the selected app list within five minutes.",
-        ) from exc
+    except subprocess.TimeoutExpired:
+        status_error = "SteamPrefill's detailed status command timed out."
     except OSError as exc:
-        raise HTTPException(status_code=500, detail=f"Unable to run Docker: {exc}") from exc
+        status_error = f"Docker could not run SteamPrefill: {exc}"
 
-    if result.returncode != 0:
-        raise HTTPException(
-            status_code=502,
-            detail=result.stderr.strip() or result.stdout.strip() or "SteamPrefill could not list selected apps.",
+    if status_result is not None:
+        selected = parse_selected_apps_status(status_result.stdout) if status_result.returncode == 0 else []
+        if selected:
+            games = library_store.replace_selected(selected, utc_now())
+            start_metadata_refresh()
+            return games, f"Loaded {len(games)} selected Steam apps with transfer sizes."
+        combined = "\n".join(part for part in (status_result.stdout, status_result.stderr) if part)
+        lowered = combined.casefold()
+        if "unexpected parameter" in lowered and "status" in lowered:
+            status_error = "This SteamPrefill build does not support select-apps status."
+        elif "unable to download manifests" in lowered or "manifestexception" in lowered:
+            status_error = "SteamPrefill could not calculate app sizes because Steam manifest retrieval failed."
+        elif status_result.returncode != 0:
+            status_error = "SteamPrefill's detailed status command failed."
+        else:
+            status_error = "SteamPrefill returned no parseable status table."
+
+    if app_ids:
+        games = selected_apps_from_ids(app_ids)
+        start_metadata_refresh()
+        detail = (
+            f"Loaded {len(games)} selected apps directly from SteamPrefill's saved config. "
+            "Names and artwork are being resolved in the background. "
+            "Transfer sizes will remain unknown until SteamPrefill's status command succeeds."
+        )
+        if status_error:
+            detail += f" {status_error}"
+        return games, detail
+
+    existing = library_store.list_games()
+    if existing:
+        start_metadata_refresh()
+        return existing, (
+            "Kept the last known game library because SteamPrefill could not refresh it. "
+            + (status_error or "Its selected-app config could not be read.")
         )
 
-    selected = parse_selected_apps_status(result.stdout)
-    if not selected:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                "SteamPrefill returned no parseable selected apps. Open Select games, save the list, "
-                "then refresh the Games view."
-            ),
-        )
-    games = library_store.replace_selected(selected, utc_now())
-    start_metadata_refresh()
-    return games, f"Loaded {len(games)} selected Steam apps."
+    raise HTTPException(
+        status_code=422,
+        detail=(
+            "CacheDeck could not read SteamPrefill's selected games. Open Select games and save the list, "
+            "then refresh. " + (status_error or "The selected-app config file was not found.")
+        ),
+    )
 
 
 async def read_target_container_output(
@@ -1176,27 +1262,50 @@ async def metadata_refresh_worker() -> None:
     if library_store.metadata_refreshing:
         return
     library_store.metadata_refreshing = True
-    try:
-        # Resolve a few at a time and persist every hit. Existing IDs are never re-looked-up.
-        for game in library_store.list_games():
-            if game.app_id is not None and game.image_url and game.store_url:
-                continue
+    semaphore = asyncio.Semaphore(6)
+
+    async def refresh_game(game: GameRecord) -> None:
+        async with semaphore:
             if game.app_id is not None:
-                library_store.save_metadata(
-                    game.key,
-                    game.app_id,
-                    f"https://cdn.cloudflare.steamstatic.com/steam/apps/{game.app_id}/header.jpg",
-                    f"https://store.steampowered.com/app/{game.app_id}/",
-                )
-                continue
+                needs_name = is_placeholder_game_name(game.name, game.app_id)
+                if needs_name:
+                    result = await asyncio.to_thread(resolve_steam_metadata_by_id, game.app_id)
+                    if result is not None:
+                        name, image_url, store_url = result
+                        library_store.save_metadata(
+                            game.key,
+                            game.app_id,
+                            image_url,
+                            store_url,
+                            name=name,
+                        )
+                        return
+                if not game.image_url or not game.store_url:
+                    library_store.save_metadata(
+                        game.key,
+                        game.app_id,
+                        f"https://cdn.cloudflare.steamstatic.com/steam/apps/{game.app_id}/header.jpg",
+                        f"https://store.steampowered.com/app/{game.app_id}/",
+                    )
+                return
+
             result = await asyncio.to_thread(resolve_steam_metadata, game.name)
             if result is None:
-                continue
+                return
             app_id, image_url, store_url = result
             library_store.save_metadata(game.key, app_id, image_url, store_url)
-            await asyncio.sleep(0.08)
+
+    completed = False
+    try:
+        await asyncio.gather(*(refresh_game(game) for game in library_store.list_games()))
+        completed = True
     finally:
         library_store.metadata_refreshing = False
+    if completed:
+        try:
+            await sync_library_activity(deep_scan=True)
+        except Exception:
+            pass
 
 
 def start_metadata_refresh() -> None:
@@ -1205,12 +1314,12 @@ def start_metadata_refresh() -> None:
     asyncio.create_task(metadata_refresh_worker())
 
 
-async def sync_library_activity() -> None:
+async def sync_library_activity(*, deep_scan: bool = False) -> None:
     status = await get_prefill_status()
     latest = history_store.latest()
     if status.running:
         try:
-            output = await read_current_prefill_output()
+            output = await read_current_prefill_output(50000 if deep_scan else 2500)
             snapshot = parse_progress_snapshot(output)
             full_run = not latest or latest.job_id != status.job_id or latest.scope == "full"
             library_store.apply_progress(snapshot, full_run=full_run, job_id=status.job_id)
@@ -1481,6 +1590,14 @@ async def logs(lines: int = Query(default=150, ge=10, le=2000)) -> CommandResult
 
 @app.post("/api/action")
 async def action(request: ActionRequest) -> CommandResult:
+    if request.action == "status":
+        games, message = await refresh_selected_library()
+        lines = [message, "", f"Selected games: {len(games)}"]
+        for game in games:
+            size = game.download_size or "size unavailable"
+            lines.append(f"{game.name} | {size}")
+        return CommandResult(ok=True, code=0, stdout="\n".join(lines), stderr="")
+
     command = ALLOWED_ACTIONS.get(request.action)
     if command is None:
         raise HTTPException(status_code=400, detail="Unsupported action.")
@@ -1662,14 +1779,14 @@ async def library(refresh: bool = Query(default=False)) -> LibraryResponse:
         _, message = await refresh_selected_library()
     else:
         start_metadata_refresh()
-    await sync_library_activity()
+    await sync_library_activity(deep_scan=refresh or bool(message))
     return build_library_response(library_store, queue_store, message=message)
 
 
 @app.post("/api/library/refresh", response_model=LibraryResponse)
 async def refresh_library() -> LibraryResponse:
     _, message = await refresh_selected_library()
-    await sync_library_activity()
+    await sync_library_activity(deep_scan=True)
     return build_library_response(library_store, queue_store, message=message)
 
 

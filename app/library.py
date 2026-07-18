@@ -113,6 +113,17 @@ def steam_store_url(app_id: int) -> str:
     return f"https://store.steampowered.com/app/{app_id}/"
 
 
+def placeholder_game_name(app_id: int) -> str:
+    return f"Steam app {app_id}"
+
+
+def is_placeholder_game_name(name: str, app_id: int | None = None) -> bool:
+    value = (name or "").strip().casefold()
+    if app_id is not None and value == placeholder_game_name(app_id).casefold():
+        return True
+    return bool(re.fullmatch(r"steam app \d+", value))
+
+
 class LibraryStore:
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -196,10 +207,16 @@ class LibraryStore:
                     )
                 if previous:
                     resolved_app_id = app.app_id or previous.app_id
+                    resolved_name = app.name or previous.name
+                    if (
+                        is_placeholder_game_name(resolved_name, resolved_app_id)
+                        and not is_placeholder_game_name(previous.name, previous.app_id)
+                    ):
+                        resolved_name = previous.name
                     update = {
                         "key": key,
                         "app_id": resolved_app_id,
-                        "name": app.name or previous.name,
+                        "name": resolved_name,
                         "download_size": app.download_size or previous.download_size,
                         "image_url": previous.image_url or (steam_artwork_url(resolved_app_id) if resolved_app_id else None),
                         "store_url": previous.store_url or (steam_store_url(resolved_app_id) if resolved_app_id else None),
@@ -425,7 +442,14 @@ class LibraryStore:
             message="CacheDeck status forgotten. The LANCache files were not deleted.",
         )
 
-    def save_metadata(self, key: str, app_id: int, image_url: str | None, store_url: str | None) -> None:
+    def save_metadata(
+        self,
+        key: str,
+        app_id: int,
+        image_url: str | None,
+        store_url: str | None,
+        name: str | None = None,
+    ) -> None:
         with self._lock:
             raw = self._read_unlocked()
             games: list[GameRecord] = []
@@ -440,6 +464,7 @@ class LibraryStore:
                         update={
                             "key": new_key,
                             "app_id": app_id,
+                            "name": name or game.name,
                             "image_url": image_url,
                             "store_url": store_url,
                         }
@@ -649,6 +674,45 @@ def parse_selected_apps_status(output: str) -> list[SelectedApp]:
     return dedupe_selected(result)
 
 
+def parse_selected_app_ids_config(output: str) -> list[int]:
+    """Parse SteamPrefill's Config/selectedAppsToPrefill.json file."""
+    text = clean_terminal_output(output).strip()
+    if not text:
+        return []
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        # Last-resort compatibility for logs wrapped around the JSON array.
+        match = re.search(r"\[[\s\d,\"]*\]", text)
+        if not match:
+            return []
+        try:
+            payload = json.loads(match.group(0))
+        except json.JSONDecodeError:
+            return []
+
+    if isinstance(payload, dict):
+        for key in ("selectedApps", "selectedAppIds", "apps", "appIds"):
+            if isinstance(payload.get(key), list):
+                payload = payload[key]
+                break
+    if not isinstance(payload, list):
+        return []
+
+    result: list[int] = []
+    seen: set[int] = set()
+    for value in payload:
+        try:
+            app_id = int(value)
+        except (TypeError, ValueError):
+            continue
+        if app_id <= 0 or app_id in seen:
+            continue
+        seen.add(app_id)
+        result.append(app_id)
+    return result
+
+
 def dedupe_selected(items: list[SelectedApp]) -> list[SelectedApp]:
     seen: set[str] = set()
     result: list[SelectedApp] = []
@@ -662,6 +726,12 @@ def dedupe_selected(items: list[SelectedApp]) -> list[SelectedApp]:
 
 
 START_RE = re.compile(r"\bStarting\s+(?P<name>.+?)\s*$", re.I)
+FINISHED_DOWNLOAD_RE = re.compile(
+    r"Finished\s+downloading\s+(?P<size>\d+(?:\.\d+)?\s*(?:[KMGTPE]i?B|bytes?))",
+    re.I,
+)
+
+
 PROGRESS_RE = re.compile(
     r"(?P<percent>\d{1,3})%"
     r"(?:\s+(?P<eta>\d{1,3}:\d{2}:\d{2}))?"
@@ -709,6 +779,15 @@ def parse_progress_snapshot(output: str) -> ProgressSnapshot:
                 downloaded_for[current] = downloaded
             if current and total:
                 total_for[current] = total
+        finished_match = FINISHED_DOWNLOAD_RE.search(line)
+        if finished_match and current:
+            finished_size = finished_match.group("size")
+            progress = 100.0
+            downloaded = finished_size
+            total = total or finished_size
+            downloaded_for[current] = finished_size
+            total_for[current] = total
+            completed.append(current)
         lowered = line.casefold()
         for pattern, bucket in (
             (r"(?P<name>.+?)\s+(?:has an update|update available)", updates),
@@ -721,7 +800,10 @@ def parse_progress_snapshot(output: str) -> ProgressSnapshot:
                 name = match.group("name").strip(" :-[]")
                 if name:
                     bucket.append(name)
-        if current and any(phrase in lowered for phrase in ("download complete", "successfully prefilled", "completed download")):
+        if current and any(
+            phrase in lowered
+            for phrase in ("download complete", "successfully prefilled", "completed download")
+        ):
             completed.append(current)
             if downloaded:
                 downloaded_for[current] = downloaded
@@ -760,6 +842,33 @@ def output_indicates_successful_prefill(output: str) -> bool:
     if not SUCCESSFUL_PREFILL_RE.search(text):
         return False
     return not FATAL_PREFILL_RE.search(text)
+
+
+def resolve_steam_metadata_by_id(
+    app_id: int,
+    timeout: int = 8,
+) -> tuple[str, str | None, str | None] | None:
+    params = urlencode({"appids": str(app_id), "l": "english", "cc": "GB"})
+    request = Request(
+        f"https://store.steampowered.com/api/appdetails/?{params}",
+        headers={"User-Agent": "CacheDeck (+https://github.com/DarmachD/CacheDeck)"},
+    )
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except Exception:
+        return None
+    entry = payload.get(str(app_id)) if isinstance(payload, dict) else None
+    if not isinstance(entry, dict) or not entry.get("success"):
+        return None
+    data = entry.get("data")
+    if not isinstance(data, dict):
+        return None
+    name = str(data.get("name") or "").strip()
+    if not name:
+        return None
+    image_url = str(data.get("header_image") or "").strip() or steam_artwork_url(app_id)
+    return name, image_url, steam_store_url(app_id)
 
 
 def resolve_steam_metadata(name: str, timeout: int = 8) -> tuple[int, str | None, str | None] | None:

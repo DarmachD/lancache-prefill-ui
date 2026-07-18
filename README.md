@@ -164,7 +164,7 @@ templates/cachedeck.xml
 Before public submission:
 
 1. Push the repository to GitHub.
-2. Tag the release, for example `v0.6.1`, if you want matching semver image tags.
+2. Tag the release, for example `v0.6.2`, if you want matching semver image tags.
 3. Confirm the GitHub Actions build succeeds.
 4. Make the `ghcr.io/darmachd/cachedeck` package public.
 5. Test a clean install from the Unraid template.
@@ -174,7 +174,7 @@ Before public submission:
 ## Versioning
 
 `VERSION` is the single release-version source for ordinary builds. A Git tag
-such as `v0.6.1` overrides it during the tagged GitHub Actions build and also
+such as `v0.6.2` overrides it during the tagged GitHub Actions build and also
 creates semver container tags.
 
 ## Development

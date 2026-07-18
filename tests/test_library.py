@@ -9,6 +9,7 @@ from app.library import (
     SelectedApp,
     output_indicates_successful_prefill,
     parse_progress_snapshot,
+    parse_selected_app_ids_config,
     parse_selected_apps_status,
 )
 
@@ -33,6 +34,18 @@ Counter-Strike 2                           34.4 GiB
         apps = parse_selected_apps_status(output)
         self.assertEqual(len(apps), 2)
         self.assertEqual(apps[1].name, "Counter-Strike 2")
+
+    def test_parses_selected_app_ids_config(self):
+        self.assertEqual(
+            parse_selected_app_ids_config('[1466860, 730, "570", 730]'),
+            [1466860, 730, 570],
+        )
+
+    def test_parses_selected_app_ids_from_wrapped_output(self):
+        self.assertEqual(
+            parse_selected_app_ids_config("config follows\n[730,570]\ndone"),
+            [730, 570],
+        )
 
     def test_recognises_successful_prefill_summary(self):
         output = """
@@ -71,6 +84,20 @@ class StoreTests(unittest.TestCase):
             )
             self.assertEqual(games[0].status, "downloaded")
             self.assertEqual(games[0].download_size, "35.0 GiB")
+
+    def test_config_placeholder_does_not_overwrite_resolved_name(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = LibraryStore(Path(directory) / "library.json")
+            store.replace_selected(
+                [SelectedApp(app_id=730, name="Counter-Strike 2", download_size="34.4 GiB")],
+                "2026-07-18T00:00:00+00:00",
+            )
+            games = store.replace_selected(
+                [SelectedApp(app_id=730, name="Steam app 730")],
+                "2026-07-18T01:00:00+00:00",
+            )
+            self.assertEqual(games[0].name, "Counter-Strike 2")
+            self.assertEqual(games[0].download_size, "34.4 GiB")
 
     def test_known_app_id_gets_artwork_without_lookup(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -130,6 +157,25 @@ Download complete
             response = build_library_response(store, queue)
             self.assertGreater(response.summary.latest_run_downloaded_bytes, 4 * 1024**3)
 
+
+    def test_real_steamprefill_finished_line_marks_game_downloaded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = LibraryStore(Path(directory) / "library.json")
+            store.replace_selected(
+                [SelectedApp(app_id=730, name="Counter-Strike 2", download_size="34.4 GiB")],
+                "2026-07-18T00:00:00+00:00",
+            )
+            snapshot = parse_progress_snapshot(
+                """
+[3:25:01 PM] Starting Counter-Strike 2
+Downloading.. 100% 00:00:00 34.4 / 34.4 GiB 800 Mbit/s
+[3:27:01 PM] Finished downloading 34.4 GiB in 00:02:00 - 2.3 Gbit/s
+"""
+            )
+            store.apply_progress(snapshot, job_id="job-2")
+            game = store.list_games()[0]
+            self.assertEqual(game.status, "downloaded")
+            self.assertEqual(game.last_downloaded, "34.4 GiB")
 
     def test_up_to_date_records_zero_download_without_changing_last_download_time(self):
         from app.library import build_library_response
