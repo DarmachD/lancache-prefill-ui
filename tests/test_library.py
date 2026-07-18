@@ -105,5 +105,103 @@ class StoreTests(unittest.TestCase):
             self.assertEqual(len(queue.list()), 1)
 
 
+class LibraryQolTests(unittest.TestCase):
+    def test_completion_records_latest_download_size(self):
+        from app.library import build_library_response
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = LibraryStore(Path(directory) / "library.json")
+            queue = QueueStore(Path(directory) / "queue.json")
+            store.replace_selected(
+                [SelectedApp(app_id=730, name="Counter-Strike 2", download_size="34.4 GiB")],
+                "2026-07-18T00:00:00+00:00",
+            )
+            snapshot = parse_progress_snapshot(
+                """
+[1:13:11 AM] Starting Counter-Strike 2
+Downloading.. 100% 00:00:00 4.2 / 34.4 GiB 800 Mbit/s
+Download complete
+"""
+            )
+            store.apply_progress(snapshot, job_id="job-1")
+            game = store.list_games()[0]
+            self.assertEqual(game.status, "downloaded")
+            self.assertEqual(game.last_downloaded, "4.2 GiB")
+            response = build_library_response(store, queue)
+            self.assertGreater(response.summary.latest_run_downloaded_bytes, 4 * 1024**3)
+
+
+    def test_up_to_date_records_zero_download_without_changing_last_download_time(self):
+        from app.library import build_library_response
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = LibraryStore(Path(directory) / "library.json")
+            queue = QueueStore(Path(directory) / "queue.json")
+            store.replace_selected(
+                [SelectedApp(app_id=730, name="Counter-Strike 2", download_size="34.4 GiB")],
+                "2026-07-18T00:00:00+00:00",
+            )
+            store.update_by_app_id(
+                730,
+                status="downloaded",
+                last_prefilled_at="2026-07-17T12:00:00+00:00",
+                last_downloaded="2.0 GiB",
+                last_downloaded_job_id="old-job",
+            )
+            snapshot = parse_progress_snapshot("Counter-Strike 2 is already up to date")
+            store.apply_progress(snapshot, job_id="job-2")
+            game = store.list_games()[0]
+            self.assertEqual(game.last_downloaded, "0 B")
+            self.assertEqual(game.last_prefilled_at, "2026-07-17T12:00:00+00:00")
+            response = build_library_response(store, queue)
+            self.assertEqual(response.summary.latest_run_downloaded_bytes, 0)
+
+    def test_summary_reports_transfer_and_queue_estimates(self):
+        from app.library import build_library_response
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = LibraryStore(Path(directory) / "library.json")
+            queue = QueueStore(Path(directory) / "queue.json")
+            store.replace_selected(
+                [
+                    SelectedApp(app_id=730, name="Counter-Strike 2", download_size="34.4 GiB"),
+                    SelectedApp(app_id=570, name="Dota 2", download_size="20.0 GiB"),
+                ],
+                "2026-07-18T00:00:00+00:00",
+            )
+            queue.enqueue(
+                GameQueueItem(
+                    queue_id="a",
+                    app_id=730,
+                    app_name="Counter-Strike 2",
+                    requested_at="2026-07-18T00:00:00+00:00",
+                )
+            )
+            response = build_library_response(store, queue)
+            self.assertEqual(response.summary.known_size_count, 2)
+            self.assertGreater(response.summary.total_size_bytes, 54 * 1024**3)
+            self.assertGreater(response.summary.queue_remaining_bytes, 34 * 1024**3)
+
+    def test_forget_status_does_not_remove_game(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = LibraryStore(Path(directory) / "library.json")
+            store.replace_selected(
+                [SelectedApp(app_id=730, name="Counter-Strike 2", download_size="34.4 GiB")],
+                "2026-07-18T00:00:00+00:00",
+            )
+            store.update_by_app_id(
+                730,
+                status="downloaded",
+                progress=100.0,
+                last_downloaded="2.0 GiB",
+                last_downloaded_job_id="job-1",
+            )
+            forgotten = store.forget_status(730)
+            self.assertIsNotNone(forgotten)
+            self.assertEqual(forgotten.status, "selected")
+            self.assertIsNone(forgotten.last_downloaded)
+            self.assertEqual(len(store.list_games()), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

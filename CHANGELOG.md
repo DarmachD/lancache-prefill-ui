@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.6.1
+
+- Added selected-library compressed transfer totals and estimated remaining queue size
+- Added per-game latest-run downloaded amounts when SteamPrefill reports them
+- Added multi-select with bulk **Check & update**, select-visible and clear-selection controls
+- Added confirmation before queuing large batches or starting large full-library checks
+- Added **Only show updates** and **Retry failed** shortcuts
+- Added last-checked and last-downloaded sorting
+- Added persistent comfortable/compact list density
+- Added a sticky game-library control bar for long libraries
+- Added per-game overflow actions with Steam Store links and **Forget CacheDeck status**
+- Clarified throughout the UI that compressed transfer size is not exact LANCache disk usage
+- Added queue and summary tests for size estimates and latest-run tracking
+- Fixed Games-view event handlers being registered inside the notification toggle path
+
 ## 0.6.0
 
 - Added Dashboard and Games view tabs

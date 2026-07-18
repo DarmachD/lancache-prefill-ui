@@ -39,8 +39,11 @@ class ProgressSnapshot(BaseModel):
     speed: str | None = None
     eta: str | None = None
     update_available_for: list[str] = Field(default_factory=list)
+    up_to_date_for: list[str] = Field(default_factory=list)
     completed_for: list[str] = Field(default_factory=list)
     failed_for: list[str] = Field(default_factory=list)
+    downloaded_for: dict[str, str] = Field(default_factory=dict)
+    total_for: dict[str, str] = Field(default_factory=dict)
 
 
 class GameRecord(BaseModel):
@@ -61,6 +64,8 @@ class GameRecord(BaseModel):
     update_available: bool | None = None
     last_checked_at: str | None = None
     last_prefilled_at: str | None = None
+    last_downloaded: str | None = None
+    last_downloaded_job_id: str | None = None
     message: str = "Selected for prefill."
 
 
@@ -82,7 +87,12 @@ class LibrarySummary(BaseModel):
     queued: int = 0
     downloading: int = 0
     update_available: int = 0
+    failed: int = 0
     unresolved: int = 0
+    known_size_count: int = 0
+    total_size_bytes: int = 0
+    queue_remaining_bytes: int = 0
+    latest_run_downloaded_bytes: int = 0
 
 
 class LibraryResponse(BaseModel):
@@ -113,6 +123,7 @@ class LibraryStore:
         return {
             "last_refreshed_at": None,
             "last_completed_job_id": None,
+            "last_activity_job_id": None,
             "games": [],
         }
 
@@ -125,6 +136,7 @@ class LibraryStore:
             return self._empty()
         raw.setdefault("last_refreshed_at", None)
         raw.setdefault("last_completed_job_id", None)
+        raw.setdefault("last_activity_job_id", None)
         raw.setdefault("games", [])
         return raw
 
@@ -148,6 +160,10 @@ class LibraryStore:
     def last_refreshed_at(self) -> str | None:
         with self._lock:
             return self._read_unlocked().get("last_refreshed_at") or None
+
+    def last_activity_job_id(self) -> str | None:
+        with self._lock:
+            return self._read_unlocked().get("last_activity_job_id") or None
 
     def replace_selected(self, selected: list[SelectedApp], refreshed_at: str) -> list[GameRecord]:
         with self._lock:
@@ -224,6 +240,8 @@ class LibraryStore:
                     game = game.model_copy(update=changes)
                     updated = game
                 games.append(game)
+            if changes.get("last_downloaded_job_id"):
+                raw["last_activity_job_id"] = changes["last_downloaded_job_id"]
             raw["games"] = [g.model_dump(mode="json") for g in games]
             self._write_unlocked(raw)
             return updated
@@ -242,6 +260,8 @@ class LibraryStore:
                     game = game.model_copy(update=changes)
                     updated = game
                 games.append(game)
+            if changes.get("last_downloaded_job_id"):
+                raw["last_activity_job_id"] = changes["last_downloaded_job_id"]
             raw["games"] = [g.model_dump(mode="json") for g in games]
             self._write_unlocked(raw)
             return updated
@@ -261,6 +281,8 @@ class LibraryStore:
                     game = game.model_copy(update=changes)
                     updated = game
                 games.append(game)
+            if changes.get("last_downloaded_job_id"):
+                raw["last_activity_job_id"] = changes["last_downloaded_job_id"]
             raw["games"] = [g.model_dump(mode="json") for g in games]
             self._write_unlocked(raw)
             return updated
@@ -276,33 +298,45 @@ class LibraryStore:
                     game = GameRecord.model_validate(item)
                 except Exception:
                     continue
+                downloaded_in_this_job = game.last_downloaded_job_id == job_id
                 game = game.model_copy(
                     update={
                         "status": "downloaded",
                         "progress": 100.0,
                         "update_available": False,
                         "last_checked_at": when,
-                        "last_prefilled_at": when,
+                        "last_prefilled_at": when if downloaded_in_this_job else game.last_prefilled_at,
                         "queue_position": None,
                         "speed": None,
                         "eta": None,
-                        "message": "Downloaded and up to date at the last successful prefill.",
+                        "message": "Checked and up to date at the last successful prefill.",
                     }
                 )
                 games.append(game)
             raw["last_completed_job_id"] = job_id
+            raw["last_activity_job_id"] = job_id
             raw["games"] = [g.model_dump(mode="json") for g in games]
             self._write_unlocked(raw)
             return True
 
-    def apply_progress(self, snapshot: ProgressSnapshot, *, full_run: bool = False) -> None:
+    def apply_progress(
+        self,
+        snapshot: ProgressSnapshot,
+        *,
+        full_run: bool = False,
+        job_id: str | None = None,
+    ) -> None:
         with self._lock:
             raw = self._read_unlocked()
             games: list[GameRecord] = []
             current = normalise_name(snapshot.app_name or "")
             update_names = {normalise_name(v) for v in snapshot.update_available_for}
+            up_to_date_names = {normalise_name(v) for v in snapshot.up_to_date_for}
             completed_names = {normalise_name(v) for v in snapshot.completed_for}
             failed_names = {normalise_name(v) for v in snapshot.failed_for}
+            downloaded_for = {normalise_name(name): value for name, value in snapshot.downloaded_for.items()}
+            total_for = {normalise_name(name): value for name, value in snapshot.total_for.items()}
+            now = utc_now()
             for item in raw.get("games", []):
                 try:
                     game = GameRecord.model_validate(item)
@@ -314,22 +348,45 @@ class LibraryStore:
                     changes.update(
                         status="update_available",
                         update_available=True,
+                        last_checked_at=now,
                         message="An update was detected.",
                     )
-                if name_key in completed_names:
+                if name_key in up_to_date_names:
                     changes.update(
                         status="downloaded",
                         progress=100.0,
+                        downloaded=None,
+                        total=None,
+                        last_downloaded="0 B",
+                        last_downloaded_job_id=job_id or game.last_downloaded_job_id,
                         update_available=False,
-                        last_checked_at=utc_now(),
-                        last_prefilled_at=utc_now(),
+                        last_checked_at=now,
                         speed=None,
                         eta=None,
+                        queue_position=None,
+                        message="Already up to date at the last check.",
+                    )
+                if name_key in completed_names:
+                    completed_download = downloaded_for.get(name_key) or total_for.get(name_key) or game.downloaded
+                    changes.update(
+                        status="downloaded",
+                        progress=100.0,
+                        downloaded=total_for.get(name_key) or game.total or game.downloaded,
+                        total=total_for.get(name_key) or game.total,
+                        last_downloaded=completed_download or game.last_downloaded,
+                        last_downloaded_job_id=job_id or game.last_downloaded_job_id,
+                        update_available=False,
+                        last_checked_at=now,
+                        last_prefilled_at=now,
+                        speed=None,
+                        eta=None,
+                        queue_position=None,
                         message="Downloaded and up to date.",
                     )
                 if name_key in failed_names:
-                    changes.update(status="failed", message="The last prefill attempt failed.")
-                if current and name_key == current:
+                    changes.update(status="failed", speed=None, eta=None, message="The last prefill attempt failed.")
+                is_finished = name_key in completed_names or name_key in up_to_date_names
+                if current and name_key == current and not is_finished:
                     changes.update(
                         status="downloading",
                         progress=max(0.0, min(100.0, snapshot.progress or 0.0)),
@@ -340,13 +397,33 @@ class LibraryStore:
                         update_available=True,
                         message="Downloading into LANCache now.",
                     )
-                elif full_run and game.status not in {"downloaded", "update_available", "failed"}:
+                elif full_run and not changes and game.status not in {"downloaded", "update_available", "failed"}:
                     changes.update(status="queued", message="Queued in the active full prefill run.")
                 if changes:
                     game = game.model_copy(update=changes)
                 games.append(game)
+            if job_id and (completed_names or up_to_date_names):
+                raw["last_activity_job_id"] = job_id
             raw["games"] = [g.model_dump(mode="json") for g in games]
             self._write_unlocked(raw)
+
+    def forget_status(self, app_id: int) -> GameRecord | None:
+        return self.update_by_app_id(
+            app_id,
+            status="selected",
+            progress=0.0,
+            downloaded=None,
+            total=None,
+            speed=None,
+            eta=None,
+            queue_position=None,
+            update_available=None,
+            last_checked_at=None,
+            last_prefilled_at=None,
+            last_downloaded=None,
+            last_downloaded_job_id=None,
+            message="CacheDeck status forgotten. The LANCache files were not deleted.",
+        )
 
     def save_metadata(self, key: str, app_id: int, image_url: str | None, store_url: str | None) -> None:
         with self._lock:
@@ -471,6 +548,23 @@ def game_key(app_id: int | None, name: str) -> str:
 ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 SIZE_RE = re.compile(r"(?P<size>\d+(?:\.\d+)?\s*(?:[KMGTPE]i?B|bytes?))", re.I)
 APP_ID_RE = re.compile(r"(?<!\d)(?P<id>\d{3,10})(?!\d)")
+SIZE_UNITS = {"B": 0, "KB": 1, "KIB": 1, "MB": 2, "MIB": 2, "GB": 3, "GIB": 3, "TB": 4, "TIB": 4, "PB": 5, "PIB": 5, "EB": 6, "EIB": 6}
+
+
+def parse_size_bytes(value: str | None) -> int:
+    if not value:
+        return 0
+    match = SIZE_RE.search(value)
+    if not match:
+        return 0
+    number_match = re.search(r"\d+(?:\.\d+)?", match.group("size"))
+    unit_match = re.search(r"(?:[KMGTPE]i?B|bytes?)", match.group("size"), re.I)
+    if not number_match or not unit_match:
+        return 0
+    unit = unit_match.group(0).upper()
+    if unit.startswith("BYTE"):
+        unit = "B"
+    return int(float(number_match.group(0)) * (1024 ** SIZE_UNITS.get(unit, 0)))
 
 
 def clean_terminal_output(value: str) -> str:
@@ -586,8 +680,11 @@ def parse_progress_snapshot(output: str) -> ProgressSnapshot:
     speed: str | None = None
     eta: str | None = None
     updates: list[str] = []
+    up_to_date: list[str] = []
     completed: list[str] = []
     failed: list[str] = []
+    downloaded_for: dict[str, str] = {}
+    total_for: dict[str, str] = {}
 
     for raw_line in text.splitlines():
         line = raw_line.strip()
@@ -608,10 +705,15 @@ def parse_progress_snapshot(output: str) -> ProgressSnapshot:
             if progress_match.group("total") and unit:
                 total = f"{progress_match.group('total')} {unit}"
             speed = progress_match.group("speed") or speed
+            if current and downloaded:
+                downloaded_for[current] = downloaded
+            if current and total:
+                total_for[current] = total
         lowered = line.casefold()
         for pattern, bucket in (
             (r"(?P<name>.+?)\s+(?:has an update|update available)", updates),
-            (r"(?P<name>.+?)\s+(?:is already up to date|already up to date|completed successfully)", completed),
+            (r"(?P<name>.+?)\s+(?:is already up to date|already up to date)", up_to_date),
+            (r"(?P<name>.+?)\s+(?:completed successfully)", completed),
             (r"(?P<name>.+?)\s+(?:failed|download failed)", failed),
         ):
             match = re.search(pattern, line, re.I)
@@ -621,6 +723,10 @@ def parse_progress_snapshot(output: str) -> ProgressSnapshot:
                     bucket.append(name)
         if current and any(phrase in lowered for phrase in ("download complete", "successfully prefilled", "completed download")):
             completed.append(current)
+            if downloaded:
+                downloaded_for[current] = downloaded
+            if total:
+                total_for[current] = total
 
     return ProgressSnapshot(
         app_name=current,
@@ -630,8 +736,11 @@ def parse_progress_snapshot(output: str) -> ProgressSnapshot:
         speed=speed,
         eta=eta,
         update_available_for=updates,
+        up_to_date_for=up_to_date,
         completed_for=completed,
         failed_for=failed,
+        downloaded_for=downloaded_for,
+        total_for=total_for,
     )
 
 
@@ -657,7 +766,7 @@ def resolve_steam_metadata(name: str, timeout: int = 8) -> tuple[int, str | None
     params = urlencode({"term": name, "l": "english", "cc": "GB"})
     request = Request(
         f"https://store.steampowered.com/api/storesearch/?{params}",
-        headers={"User-Agent": "CacheDeck/0.6 (+https://github.com/DarmachD/CacheDeck)"},
+        headers={"User-Agent": "CacheDeck (+https://github.com/DarmachD/CacheDeck)"},
     )
     try:
         with urlopen(request, timeout=timeout) as response:
@@ -721,13 +830,33 @@ def build_library_response(
         "downloaded": 6,
     }
     rendered.sort(key=lambda item: (order.get(item.status, 99), item.name.casefold()))
+    game_by_app_id = {game.app_id: game for game in rendered if game.app_id is not None}
+    queue_remaining_bytes = 0
+    for item in active_queue:
+        game = game_by_app_id.get(item.app_id)
+        if game is None:
+            continue
+        estimated = parse_size_bytes(game.download_size)
+        if item.state == "running":
+            estimated = max(0, estimated - parse_size_bytes(game.downloaded))
+        queue_remaining_bytes += estimated
+
     summary = LibrarySummary(
         total=len(rendered),
         downloaded=sum(game.status == "downloaded" for game in rendered),
         queued=sum(game.status == "queued" for game in rendered),
         downloading=sum(game.status in {"downloading", "checking"} for game in rendered),
         update_available=sum(game.status == "update_available" for game in rendered),
+        failed=sum(game.status == "failed" for game in rendered),
         unresolved=sum(game.app_id is None for game in rendered),
+        known_size_count=sum(parse_size_bytes(game.download_size) > 0 for game in rendered),
+        total_size_bytes=sum(parse_size_bytes(game.download_size) for game in rendered),
+        queue_remaining_bytes=queue_remaining_bytes,
+        latest_run_downloaded_bytes=sum(
+            parse_size_bytes(game.last_downloaded)
+            for game in rendered
+            if game.last_downloaded_job_id == store.last_activity_job_id()
+        ),
     )
     return LibraryResponse(
         generated_at=utc_now(),

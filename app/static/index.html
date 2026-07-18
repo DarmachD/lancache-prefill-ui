@@ -273,9 +273,16 @@
     .view-panel { display: none; }
     .view-panel.active { display: block; }
 
+    .library-control-card {
+      position: sticky;
+      z-index: 20;
+      top: 8px;
+      background: rgba(17, 24, 39, .98);
+      backdrop-filter: blur(12px);
+    }
     .library-toolbar {
       display: grid;
-      grid-template-columns: minmax(220px, 1fr) 190px auto;
+      grid-template-columns: minmax(220px, 1fr) 190px 190px auto;
       gap: 10px;
       align-items: end;
     }
@@ -289,21 +296,49 @@
       background: #111a29;
       color: var(--text);
     }
-    .library-summary { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; margin-top: 14px; }
+    .library-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(125px, 1fr)); gap: 10px; margin-top: 14px; }
     .library-stat { border: 1px solid var(--border-soft); border-radius: 11px; padding: 11px; background: #101827; }
     .library-stat span { display: block; color: var(--muted); font-size: .78rem; }
-    .library-stat strong { display: block; margin-top: 4px; font-size: 1.15rem; }
+    .library-stat strong { display: block; margin-top: 4px; font-size: 1.08rem; overflow-wrap: anywhere; }
+    .library-size-note {
+      margin: 12px 0 0;
+      border-left: 3px solid var(--info);
+      padding: 8px 10px;
+      background: #101827;
+      color: var(--muted);
+      font-size: .8rem;
+      line-height: 1.45;
+    }
+    .library-quick-actions, .library-bulk-bar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px;
+      margin-top: 11px;
+    }
+    .library-quick-actions button, .library-bulk-bar button { min-height: 36px; padding: 7px 10px; font-size: .82rem; }
+    .library-quick-actions button.active { border-color: var(--accent); color: #ffd5a9; background: #392817; }
+    .library-bulk-bar {
+      justify-content: space-between;
+      border-top: 1px solid var(--border-soft);
+      padding-top: 11px;
+    }
+    .library-selection-summary { color: var(--muted); font-size: .84rem; }
+    .library-selection-summary strong { color: var(--text); }
     .library-list { display: grid; gap: 10px; }
     .game-row {
       display: grid;
-      grid-template-columns: 170px minmax(0, 1fr) auto;
-      gap: 15px;
+      grid-template-columns: 28px 170px minmax(0, 1fr) 164px;
+      gap: 14px;
       align-items: center;
       border: 1px solid var(--border-soft);
       border-radius: 14px;
       padding: 12px;
       background: #101827;
     }
+    .game-select { display: grid; place-items: center; align-self: stretch; }
+    .game-select input { width: 18px; height: 18px; accent-color: var(--accent); cursor: pointer; }
+    .game-select input:disabled { cursor: not-allowed; opacity: .45; }
     .game-art {
       position: relative;
       width: 170px;
@@ -327,7 +362,8 @@
     .game-main { min-width: 0; }
     .game-title-line { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
     .game-title { margin: 0; overflow-wrap: anywhere; font-size: 1rem; }
-    .game-size { color: var(--muted); font-size: .8rem; }
+    .game-size-line { display: flex; flex-wrap: wrap; gap: 7px 14px; margin-top: 5px; color: var(--muted); font-size: .76rem; }
+    .game-size-line strong { color: #cdd9e9; font-weight: 700; }
     .game-status {
       display: inline-flex;
       align-items: center;
@@ -356,9 +392,56 @@
     .game-progress > span { display: block; width: 0; height: 100%; border-radius: inherit; background: var(--accent); transition: width .25s ease; }
     .game-progress-meta { display: flex; justify-content: space-between; gap: 10px; margin-top: 5px; color: var(--muted); font-size: .75rem; }
     .game-actions { display: grid; gap: 8px; min-width: 150px; }
-    .game-actions button { width: 100%; }
-    .game-actions a { color: #a7d8f5; font-size: .78rem; text-align: center; text-decoration: none; }
-    .game-actions a:hover { text-decoration: underline; }
+    .game-actions > button { width: 100%; }
+    .game-menu { position: relative; }
+    .game-menu > summary {
+      min-height: 34px;
+      border: 1px solid #354761;
+      border-radius: 9px;
+      padding: 7px 10px;
+      background: #182438;
+      color: var(--muted);
+      cursor: pointer;
+      font-size: .78rem;
+      font-weight: 700;
+      text-align: center;
+      list-style: none;
+    }
+    .game-menu > summary::-webkit-details-marker { display: none; }
+    .game-menu-panel {
+      position: absolute;
+      z-index: 40;
+      top: calc(100% + 5px);
+      right: 0;
+      display: grid;
+      width: 220px;
+      gap: 6px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 8px;
+      background: #131e2f;
+      box-shadow: 0 16px 35px rgba(0,0,0,.4);
+    }
+    .game-menu-panel button, .game-menu-panel a {
+      min-height: 34px;
+      border-radius: 8px;
+      padding: 8px 9px;
+      color: var(--text);
+      background: #1d2a3e;
+      font-size: .78rem;
+      font-weight: 700;
+      text-align: left;
+      text-decoration: none;
+    }
+    .game-menu-panel button { width: 100%; border: 1px solid #354761; }
+    .game-menu-panel a { display: flex; align-items: center; border: 1px solid #354761; }
+    .game-menu-panel .warning-action { color: #ffd0d5; }
+    body.library-compact .library-list { gap: 6px; }
+    body.library-compact .game-row { grid-template-columns: 24px 118px minmax(0, 1fr) 145px; gap: 10px; padding: 8px; }
+    body.library-compact .game-art { width: 118px; }
+    body.library-compact .game-message { margin: 4px 0 6px; font-size: .78rem; }
+    body.library-compact .game-size-line, body.library-compact .game-progress-meta { font-size: .7rem; }
+    body.library-compact .game-actions { gap: 5px; min-width: 135px; }
     .library-empty { border: 1px dashed var(--border); border-radius: 14px; padding: 26px; color: var(--muted); text-align: center; }
     .queue-note { margin: 0; color: var(--muted); font-size: .84rem; }
 
@@ -378,7 +461,8 @@
     @media (max-width: 1080px) {
       .layout { grid-template-columns: 1fr; }
       .job-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-      .library-summary { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      .library-toolbar { grid-template-columns: minmax(220px, 1fr) 170px 170px; }
+      .library-toolbar .density-field { grid-column: 1 / -1; }
     }
     @media (max-width: 680px) {
       main { padding: 14px; }
@@ -386,10 +470,11 @@
       .button-row button { flex: 1 1 calc(50% - 9px); }
       .job-grid { grid-template-columns: 1fr 1fr; }
       .library-toolbar { grid-template-columns: 1fr; }
-      .library-summary { grid-template-columns: 1fr 1fr; }
-      .game-row { grid-template-columns: 112px minmax(0, 1fr); align-items: start; }
-      .game-art { width: 112px; }
-      .game-actions { grid-column: 1 / -1; grid-template-columns: 1fr auto; min-width: 0; }
+      .game-row, body.library-compact .game-row { grid-template-columns: 24px 104px minmax(0, 1fr); align-items: start; }
+      .game-art, body.library-compact .game-art { width: 104px; }
+      .game-actions, body.library-compact .game-actions { grid-column: 2 / -1; grid-template-columns: 1fr 130px; min-width: 0; }
+      .library-control-card { top: 0; }
+      .library-bulk-bar { align-items: stretch; flex-direction: column; }
       #terminal { height: 480px; }
     }
   </style>
@@ -548,6 +633,21 @@
           <button id="library-check-all" class="primary" type="button">Check all &amp; update</button>
         </div>
       </div>
+      <div class="library-summary">
+        <div class="library-stat"><span>Selected games</span><strong id="library-total">0</strong></div>
+        <div class="library-stat"><span>Compressed transfer total</span><strong id="library-total-size">—</strong></div>
+        <div class="library-stat"><span>Downloaded / verified</span><strong id="library-downloaded">0</strong></div>
+        <div class="library-stat"><span>Queued</span><strong id="library-queued">0</strong></div>
+        <div class="library-stat"><span>Queue remaining</span><strong id="library-queue-size">—</strong></div>
+        <div class="library-stat"><span>Active</span><strong id="library-active">0</strong></div>
+        <div class="library-stat"><span>Updates found</span><strong id="library-updates">0</strong></div>
+        <div class="library-stat"><span>Failed</span><strong id="library-failed">0</strong></div>
+        <div class="library-stat"><span>Latest run downloaded</span><strong id="library-latest-size">—</strong></div>
+      </div>
+      <p class="library-size-note"><strong>Size note:</strong> these are SteamPrefill's compressed transfer estimates, not exact LANCache disk usage. Shared chunks, compression, cache eviction and duplicate objects can change the real space consumed.</p>
+    </div>
+
+    <div class="card library-control-card">
       <div class="library-toolbar">
         <div class="library-field">
           <label for="library-search">Search games</label>
@@ -571,15 +671,24 @@
             <option value="status">Status</option>
             <option value="name">Name</option>
             <option value="size">Download size</option>
+            <option value="last_checked">Last checked</option>
+            <option value="last_downloaded">Last downloaded</option>
           </select>
         </div>
+        <div class="library-field density-field">
+          <label>List density</label>
+          <button id="library-density" type="button">Comfortable</button>
+        </div>
       </div>
-      <div class="library-summary">
-        <div class="library-stat"><span>Selected</span><strong id="library-total">0</strong></div>
-        <div class="library-stat"><span>Downloaded</span><strong id="library-downloaded">0</strong></div>
-        <div class="library-stat"><span>Queued</span><strong id="library-queued">0</strong></div>
-        <div class="library-stat"><span>Active</span><strong id="library-active">0</strong></div>
-        <div class="library-stat"><span>Updates found</span><strong id="library-updates">0</strong></div>
+      <div class="library-quick-actions">
+        <button id="library-updates-only" type="button">Only show updates</button>
+        <button id="library-retry-failed" type="button">Retry failed</button>
+        <button id="library-select-visible" type="button">Select visible</button>
+        <button id="library-clear-selection" type="button">Clear selection</button>
+      </div>
+      <div class="library-bulk-bar">
+        <div id="library-selection-summary" class="library-selection-summary"><strong>0 selected</strong> · estimated transfer 0 B</div>
+        <button id="library-queue-selected" class="primary" type="button" disabled>Check &amp; update selected</button>
       </div>
     </div>
 
@@ -629,6 +738,8 @@
   let libraryLoaded = false;
   let libraryRequestRunning = false;
   let libraryMetadataPoll = null;
+  let libraryUpdatesOnly = false;
+  const selectedGameIds = new Set();
   const logDecoder = new TextDecoder();
 
   function showToast(message) {
@@ -710,24 +821,8 @@
   async function toggleNotifications() {
     if (notificationEnabled()) {
       setNotificationPreference(false);
-    
-  document.querySelectorAll(".view-tab").forEach((button) => {
-    button.addEventListener("click", () => switchView(button.dataset.view));
-  });
-  $("library-refresh").addEventListener("click", () => loadLibrary(true));
-  $("library-metadata").addEventListener("click", refreshLibraryMetadata);
-  $("library-check-all").addEventListener("click", checkAllLibraryGames);
-  $("library-search").addEventListener("input", renderLibrary);
-  $("library-filter").addEventListener("change", renderLibrary);
-  $("library-sort").addEventListener("change", renderLibrary);
-  $("library-list").addEventListener("click", (event) => {
-    const button = event.target.closest("button");
-    if (!button) return;
-    if (button.dataset.updateApp) queueGameUpdate(button.dataset.updateApp);
-    if (button.dataset.cancelQueue) cancelQueuedGame(button.dataset.cancelQueue);
-  });
 
-  updateNotificationButton();
+      updateNotificationButton();
       return;
     }
     if (!("Notification" in window)) {
@@ -1076,11 +1171,30 @@
 
   function parseSizeBytes(value) {
     if (!value) return 0;
+    if (typeof value === "number") return Math.max(0, value);
     const match = String(value).match(/([\d.]+)\s*([KMGTPE]?i?B)/i);
     if (!match) return 0;
     const units = { B: 0, KB: 1, KIB: 1, MB: 2, MIB: 2, GB: 3, GIB: 3, TB: 4, TIB: 4, PB: 5, PIB: 5, EB: 6, EIB: 6 };
     const exponent = units[match[2].toUpperCase()] || 0;
     return Number(match[1]) * Math.pow(1024, exponent);
+  }
+
+  function formatBytes(value) {
+    let bytes = Number(value || 0);
+    if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+    const units = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
+    let index = 0;
+    while (bytes >= 1024 && index < units.length - 1) {
+      bytes /= 1024;
+      index += 1;
+    }
+    const digits = bytes >= 100 || index === 0 ? 0 : bytes >= 10 ? 1 : 2;
+    return `${bytes.toFixed(digits)} ${units[index]}`;
+  }
+
+  function dateValue(value) {
+    const parsed = value ? new Date(value).getTime() : 0;
+    return Number.isFinite(parsed) ? parsed : 0;
   }
 
   function statusLabel(status) {
@@ -1100,21 +1214,8 @@
     return libraryData.queue.find((item) => item.app_id === game.app_id && ["queued", "running"].includes(item.state)) || null;
   }
 
-  function renderLibrary() {
-    if (!libraryData) return;
-    const summary = libraryData.summary || {};
-    $("library-total").textContent = summary.total || 0;
-    $("library-downloaded").textContent = summary.downloaded || 0;
-    $("library-queued").textContent = summary.queued || 0;
-    $("library-active").textContent = summary.downloading || 0;
-    $("library-updates").textContent = summary.update_available || 0;
-    $("games-tab-count").textContent = summary.total ? `(${summary.total})` : "";
-    $("library-message").textContent = libraryData.message || (
-      libraryData.metadata_refreshing
-        ? "Selected games loaded. Steam artwork and app IDs are still being resolved in the background."
-        : `Last refreshed ${formatTime(libraryData.last_refreshed_at)}.`
-    );
-
+  function getVisibleLibraryGames() {
+    if (!libraryData) return [];
     const search = $("library-search").value.trim().toLowerCase();
     const filter = $("library-filter").value;
     const sort = $("library-sort").value;
@@ -1124,25 +1225,79 @@
       const matchesFilter = filter === "all" ||
         (filter === "downloading" && ["downloading", "checking"].includes(game.status)) ||
         game.status === filter;
-      return matchesSearch && matchesFilter;
+      const matchesUpdates = !libraryUpdatesOnly || game.status === "update_available";
+      return matchesSearch && matchesFilter && matchesUpdates;
     });
     const statusOrder = { downloading: 0, checking: 1, queued: 2, update_available: 3, failed: 4, selected: 5, downloaded: 6 };
     games.sort((a, b) => {
       if (sort === "name") return a.name.localeCompare(b.name);
-      if (sort === "size") return parseSizeBytes(b.download_size) - parseSizeBytes(a.download_size);
+      if (sort === "size") return parseSizeBytes(b.download_size) - parseSizeBytes(a.download_size) || a.name.localeCompare(b.name);
+      if (sort === "last_checked") return dateValue(b.last_checked_at) - dateValue(a.last_checked_at) || a.name.localeCompare(b.name);
+      if (sort === "last_downloaded") return dateValue(b.last_prefilled_at) - dateValue(a.last_prefilled_at) || a.name.localeCompare(b.name);
       return (statusOrder[a.status] ?? 99) - (statusOrder[b.status] ?? 99) || a.name.localeCompare(b.name);
     });
+    return games;
+  }
 
+  function updateLibrarySelectionSummary() {
+    if (!libraryData) return;
+    const validIds = new Set((libraryData.games || []).map((game) => String(game.app_id || "")).filter(Boolean));
+    for (const appId of [...selectedGameIds]) {
+      if (!validIds.has(appId)) selectedGameIds.delete(appId);
+    }
+    const selectedGames = (libraryData.games || []).filter((game) => selectedGameIds.has(String(game.app_id || "")));
+    const selectedSize = selectedGames.reduce((total, game) => total + parseSizeBytes(game.download_size), 0);
+    $("library-selection-summary").innerHTML = `<strong>${selectedGames.length} selected</strong> · estimated transfer ${formatBytes(selectedSize)}`;
+    $("library-queue-selected").disabled = selectedGames.length === 0;
+  }
+
+  function renderLibrary() {
+    if (!libraryData) return;
+    const summary = libraryData.summary || {};
+    $("library-total").textContent = summary.total || 0;
+    $("library-total-size").textContent = summary.total_size_bytes ? formatBytes(summary.total_size_bytes) : "Unknown";
+    $("library-downloaded").textContent = summary.downloaded || 0;
+    $("library-queued").textContent = summary.queued || 0;
+    $("library-queue-size").textContent = summary.queue_remaining_bytes ? formatBytes(summary.queue_remaining_bytes) : "0 B";
+    $("library-active").textContent = summary.downloading || 0;
+    $("library-updates").textContent = summary.update_available || 0;
+    $("library-failed").textContent = summary.failed || 0;
+    $("library-latest-size").textContent = summary.latest_run_downloaded_bytes ? formatBytes(summary.latest_run_downloaded_bytes) : "Not reported";
+    $("games-tab-count").textContent = summary.total ? `(${summary.total})` : "";
+    $("library-retry-failed").disabled = !(summary.failed > 0);
+    $("library-message").textContent = libraryData.message || (
+      libraryData.metadata_refreshing
+        ? "Selected games loaded. Steam artwork and app IDs are still being resolved in the background."
+        : `Last refreshed ${formatTime(libraryData.last_refreshed_at)}. ${summary.known_size_count || 0}/${summary.total || 0} games have a known transfer size.`
+    );
+    $("library-updates-only").classList.toggle("active", libraryUpdatesOnly);
+    $("library-updates-only").textContent = libraryUpdatesOnly ? "Showing updates only" : "Only show updates";
+
+    const games = getVisibleLibraryGames();
     const list = $("library-list");
     list.innerHTML = "";
     if (!games.length) {
       list.innerHTML = '<div class="library-empty">No games match the current search and status filters.</div>';
+      updateLibrarySelectionSummary();
       return;
     }
 
     for (const game of games) {
+      const queueItem = libraryQueueForGame(game);
+      const active = ["downloading", "checking"].includes(game.status) || Boolean(queueItem);
       const row = document.createElement("article");
       row.className = "game-row";
+
+      const selection = document.createElement("label");
+      selection.className = "game-select";
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.dataset.selectApp = String(game.app_id || "");
+      checkbox.checked = game.app_id ? selectedGameIds.has(String(game.app_id)) : false;
+      checkbox.disabled = !game.app_id || active;
+      checkbox.setAttribute("aria-label", `Select ${game.name}`);
+      selection.appendChild(checkbox);
+
       const art = document.createElement("div");
       art.className = "game-art";
       const fallback = document.createElement("div");
@@ -1169,10 +1324,15 @@
       const badge = document.createElement("span");
       badge.className = `game-status ${game.status}`;
       badge.textContent = statusLabel(game.status);
-      const size = document.createElement("span");
-      size.className = "game-size";
-      size.textContent = game.download_size || (game.app_id ? `Steam app ${game.app_id}` : "Resolving Steam metadata…");
-      titleLine.append(title, badge, size);
+      titleLine.append(title, badge);
+
+      const sizeLine = document.createElement("div");
+      sizeLine.className = "game-size-line";
+      const transferSize = document.createElement("span");
+      transferSize.innerHTML = `<strong>Compressed transfer:</strong> ${escapeHtml(game.download_size || "Unknown")}`;
+      const latestSize = document.createElement("span");
+      latestSize.innerHTML = `<strong>Latest run:</strong> ${escapeHtml(game.last_downloaded || "Not reported")}`;
+      sizeLine.append(transferSize, latestSize);
 
       const message = document.createElement("p");
       message.className = "game-message";
@@ -1192,17 +1352,16 @@
       progressMeta.className = "game-progress-meta";
       const left = document.createElement("span");
       left.textContent = game.status === "downloaded"
-        ? "Downloaded to LANCache"
+        ? "Downloaded to LANCache (last verified)"
         : (game.downloaded && game.total ? `${game.downloaded} / ${game.total}` : `${Math.round(percent)}%`);
       const right = document.createElement("span");
       right.textContent = [game.speed, game.eta ? `ETA ${game.eta}` : null].filter(Boolean).join(" · ") ||
         (game.last_checked_at ? `Checked ${formatTime(game.last_checked_at)}` : "Not checked yet");
       progressMeta.append(left, right);
-      main.append(titleLine, message, progressTrack, progressMeta);
+      main.append(titleLine, sizeLine, message, progressTrack, progressMeta);
 
       const actions = document.createElement("div");
       actions.className = "game-actions";
-      const queueItem = libraryQueueForGame(game);
       const button = document.createElement("button");
       button.type = "button";
       if (!game.app_id) {
@@ -1211,7 +1370,7 @@
       } else if (queueItem && queueItem.state === "queued") {
         button.textContent = "Remove from queue";
         button.dataset.cancelQueue = queueItem.queue_id;
-      } else if (["downloading", "checking"].includes(game.status) || (queueItem && queueItem.state === "running")) {
+      } else if (active) {
         button.textContent = "In progress";
         button.disabled = true;
       } else {
@@ -1220,17 +1379,36 @@
         button.dataset.updateApp = String(game.app_id);
       }
       actions.appendChild(button);
+
+      const menu = document.createElement("details");
+      menu.className = "game-menu";
+      const menuSummary = document.createElement("summary");
+      menuSummary.textContent = "More";
+      const menuPanel = document.createElement("div");
+      menuPanel.className = "game-menu-panel";
       if (game.store_url) {
         const link = document.createElement("a");
         link.href = game.store_url;
         link.target = "_blank";
         link.rel = "noreferrer";
         link.textContent = "Open Steam store";
-        actions.appendChild(link);
+        menuPanel.appendChild(link);
       }
-      row.append(art, main, actions);
+      const forget = document.createElement("button");
+      forget.type = "button";
+      forget.className = "warning-action";
+      forget.textContent = "Forget CacheDeck status";
+      forget.dataset.forgetApp = String(game.app_id || "");
+      forget.dataset.gameName = game.name;
+      forget.disabled = !game.app_id || Boolean(queueItem) || active;
+      menuPanel.appendChild(forget);
+      menu.append(menuSummary, menuPanel);
+      actions.appendChild(menu);
+
+      row.append(selection, art, main, actions);
       list.appendChild(row);
     }
+    updateLibrarySelectionSummary();
   }
 
   async function loadLibrary(refresh = false) {
@@ -1298,11 +1476,74 @@
     }
   }
 
+  async function queueBulkGames(appIds, label = "selected games") {
+    const uniqueIds = [...new Set(appIds.map((value) => Number(value)).filter(Number.isFinite))];
+    if (!uniqueIds.length) {
+      showToast("Choose at least one game first.");
+      return;
+    }
+    if (uniqueIds.length >= 25 && !window.confirm(`Queue ${uniqueIds.length} ${label}? Checks run one game at a time and may download updates.`)) return;
+    try {
+      const response = await fetch("/api/library/queue", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ app_ids: uniqueIds })
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || "Unable to queue the selected games.");
+      libraryData = data;
+      selectedGameIds.clear();
+      renderLibrary();
+      showToast(data.message || "Games queued.");
+    } catch (error) {
+      showToast(error.message);
+    }
+  }
+
+  async function forgetGameStatus(appId, gameName) {
+    const confirmed = window.confirm(`Forget CacheDeck's status for ${gameName}? This does not delete any LANCache data or reclaim disk space.`);
+    if (!confirmed) return;
+    try {
+      const response = await fetch(`/api/library/games/${encodeURIComponent(appId)}/forget`, { method: "POST" });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || "Unable to forget the game status.");
+      libraryData = data;
+      selectedGameIds.delete(String(appId));
+      renderLibrary();
+      showToast(data.message || "Game status forgotten.");
+    } catch (error) {
+      showToast(error.message);
+    }
+  }
+
+  function selectVisibleGames() {
+    for (const game of getVisibleLibraryGames()) {
+      const queueItem = libraryQueueForGame(game);
+      const active = ["downloading", "checking"].includes(game.status) || Boolean(queueItem);
+      if (game.app_id && !active) selectedGameIds.add(String(game.app_id));
+    }
+    renderLibrary();
+  }
+
+  function setLibraryDensity(compact) {
+    document.body.classList.toggle("library-compact", compact);
+    $("library-density").textContent = compact ? "Compact" : "Comfortable";
+    try { localStorage.setItem("cachedeck.libraryDensity", compact ? "compact" : "comfortable"); } catch (_) {}
+  }
+
+  function initialiseLibraryDensity() {
+    let compact = false;
+    try { compact = localStorage.getItem("cachedeck.libraryDensity") === "compact"; } catch (_) {}
+    setLibraryDensity(compact);
+  }
+
   async function checkAllLibraryGames() {
     if (lastPrefillState && lastPrefillState.running) {
       showToast("A SteamPrefill job is already running.");
       return;
     }
+    const gameCount = Number((libraryData && libraryData.summary && libraryData.summary.total) || 0);
+    if (gameCount >= 25 && !window.confirm(`Start a full check of ${gameCount} selected games? SteamPrefill will download every update it finds.`)) return;
     $("library-message").textContent = "Starting a full update check. SteamPrefill will download any updates it finds…";
     try {
       const response = await fetch("/api/prefill/start", { method: "POST" });
@@ -1339,6 +1580,39 @@
       list.innerHTML = `<span class="muted">Unable to run diagnostics: ${escapeHtml(error.message)}</span>`;
     }
   }
+
+  document.querySelectorAll(".view-tab").forEach((button) => {
+    button.addEventListener("click", () => switchView(button.dataset.view));
+  });
+  $("library-refresh").addEventListener("click", () => loadLibrary(true));
+  $("library-metadata").addEventListener("click", refreshLibraryMetadata);
+  $("library-check-all").addEventListener("click", checkAllLibraryGames);
+  $("library-search").addEventListener("input", renderLibrary);
+  $("library-filter").addEventListener("change", renderLibrary);
+  $("library-sort").addEventListener("change", renderLibrary);
+  $("library-density").addEventListener("click", () => setLibraryDensity(!document.body.classList.contains("library-compact")));
+  $("library-updates-only").addEventListener("click", () => { libraryUpdatesOnly = !libraryUpdatesOnly; renderLibrary(); });
+  $("library-retry-failed").addEventListener("click", () => {
+    const failedIds = (libraryData && libraryData.games || []).filter((game) => game.status === "failed" && game.app_id).map((game) => game.app_id);
+    queueBulkGames(failedIds, "failed games");
+  });
+  $("library-select-visible").addEventListener("click", selectVisibleGames);
+  $("library-clear-selection").addEventListener("click", () => { selectedGameIds.clear(); renderLibrary(); });
+  $("library-queue-selected").addEventListener("click", () => queueBulkGames([...selectedGameIds], "selected games"));
+  $("library-list").addEventListener("change", (event) => {
+    const checkbox = event.target.closest("input[data-select-app]");
+    if (!checkbox || !checkbox.dataset.selectApp) return;
+    if (checkbox.checked) selectedGameIds.add(checkbox.dataset.selectApp);
+    else selectedGameIds.delete(checkbox.dataset.selectApp);
+    updateLibrarySelectionSummary();
+  });
+  $("library-list").addEventListener("click", (event) => {
+    const button = event.target.closest("button");
+    if (!button) return;
+    if (button.dataset.updateApp) queueGameUpdate(button.dataset.updateApp);
+    if (button.dataset.cancelQueue) cancelQueuedGame(button.dataset.cancelQueue);
+    if (button.dataset.forgetApp) forgetGameStatus(button.dataset.forgetApp, button.dataset.gameName || "this game");
+  });
 
   $("select-games").addEventListener("click", () => openConsole("./SteamPrefill select-apps"));
   $("open-console").addEventListener("click", () => openConsole());
@@ -1393,6 +1667,7 @@
     if ($("target-logs-details").open && !targetLogsLoaded) refreshLogs();
   });
 
+  initialiseLibraryDensity();
   updateNotificationButton();
   updateHealth();
   updatePrefill();

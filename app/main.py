@@ -33,6 +33,7 @@ from app.library import (
     parse_progress_snapshot,
     parse_selected_apps_status,
     output_indicates_successful_prefill,
+    parse_size_bytes,
     resolve_steam_metadata,
 )
 
@@ -81,6 +82,10 @@ SCHEDULE_KEYS: Final = (
 
 class ActionRequest(BaseModel):
     action: str
+
+
+class BulkQueueRequest(BaseModel):
+    app_ids: list[int]
 
 
 class CommandResult(BaseModel):
@@ -1208,7 +1213,7 @@ async def sync_library_activity() -> None:
             output = await read_current_prefill_output()
             snapshot = parse_progress_snapshot(output)
             full_run = not latest or latest.job_id != status.job_id or latest.scope == "full"
-            library_store.apply_progress(snapshot, full_run=full_run)
+            library_store.apply_progress(snapshot, full_run=full_run, job_id=status.job_id)
         except Exception:
             pass
         return
@@ -1220,7 +1225,7 @@ async def sync_library_activity() -> None:
         if latest.state == "finished" and latest.started_at:
             try:
                 output = await read_target_container_output(5000, since=latest.started_at)
-                library_store.apply_progress(parse_progress_snapshot(output), full_run=True)
+                library_store.apply_progress(parse_progress_snapshot(output), full_run=True, job_id=latest.job_id)
                 if output_indicates_successful_prefill(output):
                     library_store.mark_all_downloaded(
                         latest.job_id,
@@ -1239,11 +1244,29 @@ async def sync_library_activity() -> None:
 
     if latest.state == "completed":
         finished = latest.finished_at or utc_now()
+        try:
+            output = await read_current_prefill_output()
+            library_store.apply_progress(parse_progress_snapshot(output), full_run=False, job_id=latest.job_id)
+        except Exception:
+            pass
         queue_store.update(
             running_item.queue_id,
             state="completed",
             finished_at=finished,
             message="Steam checked the app and downloaded any available update.",
+        )
+        completed_game = next(
+            (game for game in library_store.list_games() if game.app_id == running_item.app_id),
+            None,
+        )
+        reported_this_run = (
+            (completed_game.downloaded or completed_game.total)
+            if completed_game
+            else None
+        )
+        downloaded_this_run = parse_size_bytes(reported_this_run) > 0
+        known_for_this_job = bool(
+            completed_game and completed_game.last_downloaded_job_id == latest.job_id
         )
         library_store.update_by_app_id(
             running_item.app_id,
@@ -1252,10 +1275,24 @@ async def sync_library_activity() -> None:
             queue_position=None,
             update_available=False,
             last_checked_at=finished,
-            last_prefilled_at=finished,
+            last_prefilled_at=(
+                finished
+                if downloaded_this_run
+                else (completed_game.last_prefilled_at if completed_game else None)
+            ),
+            last_downloaded=(
+                reported_this_run
+                if downloaded_this_run
+                else (
+                    completed_game.last_downloaded
+                    if known_for_this_job and completed_game
+                    else "Not reported"
+                )
+            ),
+            last_downloaded_job_id=latest.job_id,
             speed=None,
             eta=None,
-            message="Downloaded and up to date at the last check.",
+            message="Checked and up to date at the last check.",
         )
     elif latest.state in {"failed", "stopped", "interrupted"}:
         finished = latest.finished_at or utc_now()
@@ -1294,6 +1331,10 @@ async def game_queue_loop() -> None:
                         item.app_id,
                         status="checking",
                         progress=0.0,
+                        downloaded=None,
+                        total=None,
+                        speed=None,
+                        eta=None,
                         queue_position=None,
                         update_available=None,
                         message="Checking Steam and applying an update if needed.",
@@ -1642,34 +1683,95 @@ async def refresh_library_metadata() -> LibraryResponse:
     )
 
 
+def enqueue_library_games(app_ids: list[int]) -> tuple[int, list[str]]:
+    unique_ids = list(dict.fromkeys(app_ids))
+    if not unique_ids:
+        raise HTTPException(status_code=400, detail="Choose at least one Steam app.")
+    if len(unique_ids) > 1000:
+        raise HTTPException(status_code=400, detail="A maximum of 1,000 games can be queued at once.")
+
+    games_by_id = {
+        game.app_id: game
+        for game in library_store.list_games()
+        if game.app_id is not None
+    }
+    missing = [app_id for app_id in unique_ids if app_id not in games_by_id]
+    if missing:
+        raise HTTPException(
+            status_code=404,
+            detail=f"{len(missing)} Steam app(s) are not in the selected library.",
+        )
+
+    queued_names: list[str] = []
+    active_ids = {item.app_id for item in queue_store.active()}
+    for app_id in unique_ids:
+        game = games_by_id[app_id]
+        queue_item = queue_store.enqueue(
+            GameQueueItem(
+                queue_id=uuid.uuid4().hex,
+                app_id=app_id,
+                app_name=game.name,
+                requested_at=utc_now(),
+            )
+        )
+        library_store.update_by_app_id(
+            app_id,
+            status="queued" if queue_item.state == "queued" else "checking",
+            progress=0.0,
+            update_available=None,
+            message=(
+                "Queued for a Steam update check. Any available update will be downloaded automatically."
+                if queue_item.state == "queued"
+                else "Steam is already checking this app."
+            ),
+        )
+        if app_id not in active_ids:
+            queued_names.append(game.name)
+    return len(queued_names), queued_names
+
+
 @app.post("/api/library/games/{app_id}/update", response_model=LibraryResponse)
 async def queue_game_update(app_id: int) -> LibraryResponse:
-    game = next((item for item in library_store.list_games() if item.app_id == app_id), None)
-    if game is None:
-        raise HTTPException(status_code=404, detail="That Steam app is not in the selected library.")
-    queue_item = queue_store.enqueue(
-        GameQueueItem(
-            queue_id=uuid.uuid4().hex,
-            app_id=app_id,
-            app_name=game.name,
-            requested_at=utc_now(),
-        )
-    )
-    library_store.update_by_app_id(
-        app_id,
-        status="queued" if queue_item.state == "queued" else "checking",
-        progress=0.0,
-        update_available=None,
-        message=(
-            "Queued for a Steam update check. Any available update will be downloaded automatically."
-            if queue_item.state == "queued"
-            else "Steam is already checking this app."
-        ),
-    )
+    count, names = enqueue_library_games([app_id])
     return build_library_response(
         library_store,
         queue_store,
-        message=f"{game.name} is {queue_item.state}.",
+        message=f"{names[0]} was added to the update queue." if count else "That game is already queued or running.",
+    )
+
+
+@app.post("/api/library/queue", response_model=LibraryResponse)
+async def queue_library_games(request: BulkQueueRequest) -> LibraryResponse:
+    count, _ = enqueue_library_games(request.app_ids)
+    return build_library_response(
+        library_store,
+        queue_store,
+        message=(
+            f"Added {count} game{'s' if count != 1 else ''} to the update queue."
+            if count
+            else "Every selected game is already queued or running."
+        ),
+    )
+
+
+@app.post("/api/library/games/{app_id}/forget", response_model=LibraryResponse)
+async def forget_game_status(app_id: int) -> LibraryResponse:
+    active_item = next(
+        (item for item in queue_store.active() if item.app_id == app_id),
+        None,
+    )
+    if active_item is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="Remove this game from the queue or wait for its current check to finish first.",
+        )
+    game = library_store.forget_status(app_id)
+    if game is None:
+        raise HTTPException(status_code=404, detail="That Steam app is not in the selected library.")
+    return build_library_response(
+        library_store,
+        queue_store,
+        message=f"Forgot CacheDeck's status for {game.name}. LANCache data was not deleted.",
     )
 
 
