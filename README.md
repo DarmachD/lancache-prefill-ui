@@ -11,6 +11,7 @@ console without replacing SteamPrefill's own authentication or game selector.
 - Detached prefills continue after the browser or laptop disconnects
 - Reconnectable live output using a WebSocket stream rather than repeated log polling
 - Detection of jobs started by SteamPrefill's scheduler or another client
+- Pause and resume controls for active CacheDeck or scheduler-started prefills
 - Persistent run history stored in CacheDeck's `/config` directory
 - Optional one-shot automatic resume after a managed job is interrupted
 - Configured cron schedule, timezone and next expected run display
@@ -67,10 +68,20 @@ Two locations are used deliberately:
   appdata. It stores run history that survives CacheDeck and target-container
   recreation.
 
+The **Pause prefill** button temporarily freezes the active SteamPrefill process
+without stopping CacheDeck or the target container. Resume continues the same
+process, although a network request that timed out during a long pause may retry.
+This works for CacheDeck-managed and scheduler-started prefills.
+
 A restart of the SteamPrefill target container still terminates the actual
 SteamPrefill process. Set `AUTO_RESUME_INTERRUPTED=true` to let CacheDeck make
 one automatic restart attempt after it detects that a managed job disappeared.
-It is disabled by default to avoid unexpected bandwidth use.
+The UI calls this **Restart recovery** because it is separate from manual
+Pause/Resume. It is disabled by default to avoid unexpected bandwidth use.
+
+When a target-container log says `SteamPrefill already running, aborting schedule`,
+the existing prefill has not been stopped. The scheduler detected the active job
+and skipped only its duplicate launch.
 
 ## Schedule detection
 
@@ -111,7 +122,7 @@ templates/cachedeck.xml
 Before public submission:
 
 1. Push the repository to GitHub.
-2. Tag the release, for example `v0.5.0`, if you want matching semver image tags.
+2. Tag the release, for example `v0.5.1`, if you want matching semver image tags.
 3. Confirm the GitHub Actions build succeeds.
 4. Make the `ghcr.io/darmachd/cachedeck` package public.
 5. Test a clean install from the Unraid template.
@@ -121,7 +132,7 @@ Before public submission:
 ## Versioning
 
 `VERSION` is the single release-version source for ordinary builds. A Git tag
-such as `v0.5.0` overrides it during the tagged GitHub Actions build and also
+such as `v0.5.1` overrides it during the tagged GitHub Actions build and also
 creates semver container tags.
 
 ## Development

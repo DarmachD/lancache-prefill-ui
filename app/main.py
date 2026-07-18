@@ -79,6 +79,7 @@ PrefillState = Literal[
     "idle",
     "starting",
     "running",
+    "paused",
     "completed",
     "failed",
     "stopped",
@@ -94,6 +95,8 @@ class PrefillStatus(BaseModel):
     managed: bool
     source: Literal["cachedeck", "external", "none"] = "none"
     pid: int | None = None
+    worker_pid: int | None = None
+    paused: bool = False
     job_id: str | None = None
     started_at: str | None = None
     finished_at: str | None = None
@@ -393,25 +396,25 @@ if [[ "$managed_pid" =~ ^[0-9]+$ ]] && kill -0 "$managed_pid" 2>/dev/null; then
     fi
 fi
 
-external_pid=""
-external_started=""
-if [ "$managed_running" != "true" ]; then
-    for proc_dir in /proc/[0-9]*; do
-        candidate_pid="${{proc_dir##*/}}"
-        [ "$candidate_pid" = "$$" ] && continue
-        [ -r "$proc_dir/cmdline" ] || continue
-        cmdline="$(tr '\\0' ' ' < "$proc_dir/cmdline" 2>/dev/null || true)"
-        if [[ "$cmdline" =~ SteamPrefill.*[[:space:]]prefill([[:space:]]|$) ]]; then
-            external_pid="$candidate_pid"
-            elapsed="$(ps -o etimes= -p "$candidate_pid" 2>/dev/null | tr -d ' ' || true)"
-            if [[ "$elapsed" =~ ^[0-9]+$ ]]; then
-                start_epoch="$(( $(date +%s) - elapsed ))"
-                external_started="$(date -u -d "@$start_epoch" +'%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || true)"
-            fi
-            break
+worker_pid=""
+worker_started=""
+worker_state=""
+for proc_dir in /proc/[0-9]*; do
+    candidate_pid="${{proc_dir##*/}}"
+    [ "$candidate_pid" = "$$" ] && continue
+    [ -r "$proc_dir/cmdline" ] || continue
+    cmdline="$(tr '\\0' ' ' < "$proc_dir/cmdline" 2>/dev/null || true)"
+    if [[ "$cmdline" =~ SteamPrefill.*[[:space:]]prefill([[:space:]]|$) ]]; then
+        worker_pid="$candidate_pid"
+        worker_state="$(ps -o stat= -p "$candidate_pid" 2>/dev/null | tr -d ' ' || true)"
+        elapsed="$(ps -o etimes= -p "$candidate_pid" 2>/dev/null | tr -d ' ' || true)"
+        if [[ "$elapsed" =~ ^[0-9]+$ ]]; then
+            start_epoch="$(( $(date +%s) - elapsed ))"
+            worker_started="$(date -u -d "@$start_epoch" +'%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || true)"
         fi
-    done
-fi
+        break
+    fi
+done
 
 job_id="$(read_file "$job_file")"
 started_at="$(read_file "$started_file")"
@@ -423,13 +426,14 @@ log_available="false"
 printf '%s\\0' \
     "$managed_pid" \
     "$managed_running" \
-    "$external_pid" \
+    "$worker_pid" \
     "$job_id" \
     "$started_at" \
     "$finished_at" \
     "$exit_code" \
     "$log_available" \
-    "$external_started"
+    "$worker_started" \
+    "$worker_state"
 """.strip()
 
 
@@ -469,7 +473,7 @@ async def get_raw_prefill_status() -> PrefillStatus:
         )
 
     fields = result.stdout.split("\0")
-    if len(fields) < 9:
+    if len(fields) < 10:
         return PrefillStatus(
             state="unavailable",
             running=False,
@@ -479,43 +483,58 @@ async def get_raw_prefill_status() -> PrefillStatus:
 
     managed_pid = parse_int(fields[0])
     managed_running = fields[1] == "true"
-    external_pid = parse_int(fields[2])
+    worker_pid = parse_int(fields[2])
     job_id = fields[3] or None
     started_at = fields[4] or None
     finished_at = fields[5] or None
     exit_code = parse_int(fields[6])
     log_available = fields[7] == "true"
-    external_started = fields[8] or None
+    worker_started = fields[8] or None
+    worker_state = fields[9] or ""
+    paused = worker_state.startswith(("T", "t"))
 
     if managed_running:
         return PrefillStatus(
-            state="running",
+            state="paused" if paused else "running",
             running=True,
             managed=True,
             source="cachedeck",
             pid=managed_pid,
+            worker_pid=worker_pid,
+            paused=paused,
             job_id=job_id,
             started_at=started_at,
             log_available=log_available,
             log_source="cachedeck",
-            message="Prefill is running independently on the server.",
+            message=(
+                "Prefill is paused. Resume it when you are ready."
+                if paused
+                else "Prefill is running independently on the server."
+            ),
         )
 
-    if external_pid is not None:
-        external_job_id = f"external-{external_pid}-{external_started or 'unknown'}"
+    if worker_pid is not None:
+        external_job_id = f"external-{worker_pid}-{worker_started or 'unknown'}"
         return PrefillStatus(
-            state="running",
+            state="paused" if paused else "running",
             running=True,
             managed=False,
             source="external",
-            pid=external_pid,
+            pid=worker_pid,
+            worker_pid=worker_pid,
+            paused=paused,
             job_id=external_job_id,
-            started_at=external_started,
+            started_at=worker_started,
             log_available=True,
             log_source="container",
             message=(
-                "A scheduler or externally started prefill is running. "
-                "Output is being read from the target container log."
+                "The scheduled/external prefill is paused. Resume it when you are ready."
+                if paused
+                else (
+                    "A scheduler or externally started prefill is running. "
+                    "If the log says 'already running, aborting schedule', only the "
+                    "duplicate scheduled launch was skipped; the active prefill continues."
+                )
             ),
         )
 
@@ -590,7 +609,7 @@ async def get_prefill_status() -> PrefillStatus:
     status = await get_raw_prefill_status()
     latest = history_store.latest()
 
-    if status.state == "idle" and latest and latest.state == "running":
+    if status.state == "idle" and latest and latest.state in {"running", "paused"}:
         if latest.source == "cachedeck":
             status = PrefillStatus(
                 state="interrupted",
@@ -1089,7 +1108,10 @@ app = FastAPI(
 
 @app.get("/", include_in_schema=False)
 async def index() -> FileResponse:
-    return FileResponse(STATIC_DIR / "index.html")
+    return FileResponse(
+        STATIC_DIR / "index.html",
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.get("/favicon.svg", include_in_schema=False)
@@ -1171,6 +1193,63 @@ async def start_prefill() -> PrefillStartResult:
     return await launch_prefill_job()
 
 
+async def set_prefill_paused(paused: bool) -> PrefillStartResult:
+    current = await get_prefill_status()
+    operation = "pause" if paused else "resume"
+    if not current.running:
+        raise HTTPException(status_code=409, detail="No prefill job is running.")
+    if current.worker_pid is None:
+        raise HTTPException(
+            status_code=409,
+            detail=f"The active SteamPrefill process cannot be controlled, so CacheDeck cannot {operation} it.",
+        )
+    if current.paused == paused:
+        return PrefillStartResult(
+            ok=True,
+            message=f"Prefill is already {'paused' if paused else 'running'}.",
+            status=current,
+        )
+
+    signal_name = "STOP" if paused else "CONT"
+    control_command = f"""
+pid={current.worker_pid}
+if ! kill -0 "$pid" 2>/dev/null; then exit 3; fi
+cmdline="$(tr '\\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
+if [[ ! "$cmdline" =~ SteamPrefill.*[[:space:]]prefill([[:space:]]|$) ]]; then exit 4; fi
+kill -{signal_name} "$pid"
+""".strip()
+    try:
+        result = await run_target_command(control_command, timeout=10)
+    except subprocess.TimeoutExpired as exc:
+        raise HTTPException(status_code=504, detail=f"Timed out while trying to {operation} the prefill job.") from exc
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Unable to run Docker: {exc}") from exc
+    if result.returncode != 0:
+        raise HTTPException(status_code=409, detail=f"The active prefill process could not be {operation}d.")
+
+    await asyncio.sleep(0.25)
+    status = await get_prefill_status()
+    return PrefillStartResult(
+        ok=True,
+        message=(
+            "Prefill paused. CacheDeck and the target scheduler remain online."
+            if paused
+            else "Prefill resumed. An in-flight request may retry if it timed out while paused."
+        ),
+        status=status,
+    )
+
+
+@app.post("/api/prefill/pause", response_model=PrefillStartResult)
+async def pause_prefill() -> PrefillStartResult:
+    return await set_prefill_paused(True)
+
+
+@app.post("/api/prefill/resume", response_model=PrefillStartResult)
+async def resume_prefill() -> PrefillStartResult:
+    return await set_prefill_paused(False)
+
+
 @app.post("/api/prefill/stop", response_model=PrefillStartResult)
 async def stop_prefill() -> PrefillStartResult:
     current = await get_prefill_status()
@@ -1186,6 +1265,8 @@ async def stop_prefill() -> PrefillStartResult:
 state_dir={shlex.quote(PREFILL_STATE_DIR)}
 wrapper_file="$state_dir/prefill-wrapper.sh"
 pid={current.pid}
+worker_pid={current.worker_pid or ""}
+if [[ "$worker_pid" =~ ^[0-9]+$ ]]; then kill -CONT "$worker_pid" 2>/dev/null || true; fi
 if ! kill -0 "$pid" 2>/dev/null; then exit 3; fi
 cmdline="$(tr '\\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
 if [[ "$cmdline" != *"$wrapper_file"* ]]; then exit 4; fi

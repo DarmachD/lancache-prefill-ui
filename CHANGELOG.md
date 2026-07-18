@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.1
+
+- Added Pause/Resume control for active SteamPrefill jobs, including scheduler-started jobs
+- Clarified that `already running, aborting schedule` means only the duplicate scheduled launch was skipped
+- Renamed the UI's auto-resume status to Restart recovery to distinguish it from manual Pause/Resume
+- Ensured a paused managed job can still be stopped cleanly
+- Disabled browser caching for the main dashboard so updates do not leave an old UI behind
+
 ## 0.5.0
 
 - Replaced repeated log polling with a reconnectable live WebSocket stream

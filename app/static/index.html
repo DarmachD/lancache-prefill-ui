@@ -138,6 +138,8 @@
     .job-state::before { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); content: ""; }
     .job-state.running { border-color: #2d6849; color: #a8efc5; }
     .job-state.running::before { background: var(--success); box-shadow: 0 0 0 5px rgba(82,216,141,.1); }
+    .job-state.paused { border-color: #6f5c2f; color: #f7d98a; }
+    .job-state.paused::before { background: var(--warning); box-shadow: 0 0 0 5px rgba(241,196,83,.1); }
     .job-state.completed, .job-state.finished { border-color: #315c78; color: #b8ddf4; }
     .job-state.completed::before, .job-state.finished::before { background: var(--info); }
     .job-state.failed, .job-state.unavailable { border-color: #71404a; color: #ffc1c8; }
@@ -299,6 +301,7 @@
         <div class="button-row">
           <button id="select-games" class="primary" type="button">Select games</button>
           <button id="start-prefill" class="primary" type="button">Start prefill</button>
+          <button id="pause-prefill" type="button" disabled>Pause prefill</button>
           <button id="stop-prefill" class="danger" type="button" disabled>Stop prefill</button>
           <button id="show-status" type="button">SteamPrefill status</button>
           <button id="open-console" type="button">Open console</button>
@@ -367,7 +370,7 @@
           <div class="stat"><dt>Container user</dt><dd id="prefill-user">—</dd></div>
           <div class="stat"><dt>Target state</dt><dd id="prefill-state-dir">—</dd></div>
           <div class="stat"><dt>Persistent config</dt><dd id="config-dir">—</dd></div>
-          <div class="stat"><dt>Auto-resume</dt><dd id="auto-resume">—</dd></div>
+          <div class="stat"><dt title="Relaunches an interrupted CacheDeck-managed job after the target container restarts. This is separate from the Pause/Resume control.">Restart recovery</dt><dd id="auto-resume">—</dd></div>
           <div class="stat"><dt>CacheDeck version</dt><dd id="app-version">—</dd></div>
         </dl>
       </div>
@@ -423,6 +426,7 @@
   const prefillState = $("prefill-state");
   const prefillMessage = $("prefill-message");
   const startPrefillButton = $("start-prefill");
+  const pausePrefillButton = $("pause-prefill");
   const stopPrefillButton = $("stop-prefill");
   const logStatus = $("log-status");
   const activityCard = $("activity-card");
@@ -727,11 +731,18 @@
       : (data.source === "cachedeck" ? "CacheDeck" : data.source === "external" ? "Scheduler / external" : "—");
     $("prefill-exit-code").textContent = data.exit_code === null || data.exit_code === undefined ? "—" : String(data.exit_code);
     startPrefillButton.disabled = data.running || data.state === "unavailable";
+    pausePrefillButton.disabled = !data.running || !data.worker_pid || prefillRequestRunning;
+    pausePrefillButton.textContent = data.paused ? "Resume prefill" : "Pause prefill";
+    pausePrefillButton.classList.toggle("primary", Boolean(data.paused));
     stopPrefillButton.disabled = !data.running || !data.managed || prefillRequestRunning;
-    document.title = data.running ? "Running · CacheDeck" : `${data.state[0].toUpperCase()}${data.state.slice(1)} · CacheDeck`;
+    document.title = data.paused
+      ? "Paused · CacheDeck"
+      : (data.running ? "Running · CacheDeck" : `${data.state[0].toUpperCase()}${data.state.slice(1)} · CacheDeck`);
     if (data.log_source && data.log_source !== prefillLogSource) connectPrefillLog(data.log_source);
     if (!data.log_source || data.log_source === "none") closePrefillLog();
-    if (oldState === "running" && data.state !== "running") {
+    const oldActive = ["running", "paused", "starting"].includes(oldState);
+    const newActive = data.running || ["running", "paused", "starting"].includes(data.state);
+    if (oldActive && !newActive) {
       notifyCompletion(data);
       updateHistory();
       updateSchedule();
@@ -757,7 +768,7 @@
     } catch (error) {
       applyPrefillStatus({
         state: "unavailable", running: false, managed: false, source: "none",
-        started_at: null, finished_at: null, exit_code: null, log_source: "none",
+        worker_pid: null, paused: false, started_at: null, finished_at: null, exit_code: null, log_source: "none",
         message: `Unable to read prefill state: ${error.message}`
       });
     } finally {
@@ -769,9 +780,16 @@
     if (prefillRequestRunning) return;
     prefillRequestRunning = true;
     startPrefillButton.disabled = true;
+    pausePrefillButton.disabled = true;
     stopPrefillButton.disabled = true;
     actionOutput.hidden = false;
-    actionOutput.textContent = operation === "start" ? "Starting detached prefill…" : "Stopping prefill…";
+    const operationMessages = {
+      start: "Starting detached prefill…",
+      pause: "Pausing prefill…",
+      resume: "Resuming prefill…",
+      stop: "Stopping prefill…"
+    };
+    actionOutput.textContent = operationMessages[operation] || "Updating prefill…";
     try {
       const response = await fetch(`/api/prefill/${operation}`, { method: "POST" });
       const data = await response.json();
@@ -832,7 +850,7 @@
       }
       for (const record of data) {
         const row = document.createElement("tr");
-        const duration = formatDuration(durationSeconds(record.started_at, record.finished_at || (["running", "starting"].includes(record.state) ? null : record.started_at)));
+        const duration = formatDuration(durationSeconds(record.started_at, record.finished_at || (["running", "paused", "starting"].includes(record.state) ? null : record.started_at)));
         row.innerHTML = `<td>${escapeHtml(formatTime(record.started_at))}</td>` +
           `<td>${escapeHtml(record.source)}</td>` +
           `<td><span class="job-state ${escapeHtml(record.state)}">${escapeHtml(record.state)}</span></td>` +
@@ -872,6 +890,9 @@
   $("select-games").addEventListener("click", () => openConsole("./SteamPrefill select-apps"));
   $("open-console").addEventListener("click", () => openConsole());
   startPrefillButton.addEventListener("click", () => controlPrefill("start"));
+  pausePrefillButton.addEventListener("click", () => {
+    controlPrefill(lastPrefillState && lastPrefillState.paused ? "resume" : "pause");
+  });
   stopPrefillButton.addEventListener("click", () => {
     if (window.confirm("Stop the active CacheDeck prefill job?")) controlPrefill("stop");
   });
