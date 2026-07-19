@@ -265,6 +265,26 @@ Downloading.. 100% 00:00:00 34.4 / 34.4 GiB 800 Mbit/s
             self.assertGreater(response.summary.total_size_bytes, 54 * 1024**3)
             self.assertGreater(response.summary.queue_remaining_bytes, 34 * 1024**3)
 
+    def test_manual_download_mark_and_forget_verification_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = LibraryStore(Path(directory) / "library.json")
+            store.replace_selected(
+                [SelectedApp(app_id=730, name="Example Game")],
+                "2026-07-19T12:00:00+00:00",
+            )
+            marked = store.mark_manually_downloaded(730, "2026-07-19T12:05:00+00:00")
+            self.assertIsNotNone(marked)
+            self.assertEqual(marked.status, "downloaded")
+            self.assertEqual(marked.progress, 100.0)
+            self.assertEqual(marked.verification_source, "manual")
+            self.assertEqual(marked.verified_at, "2026-07-19T12:05:00+00:00")
+
+            forgotten = store.forget_status(730)
+            self.assertIsNotNone(forgotten)
+            self.assertEqual(forgotten.status, "selected")
+            self.assertIsNone(forgotten.verification_source)
+            self.assertIsNone(forgotten.verified_at)
+
     def test_forget_status_does_not_remove_game(self):
         with tempfile.TemporaryDirectory() as directory:
             store = LibraryStore(Path(directory) / "library.json")

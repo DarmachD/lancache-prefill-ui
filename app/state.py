@@ -99,7 +99,7 @@ class SQLiteLibraryStore(LibraryStore):
         for game in self.list_games():
             if game.app_id not in app_ids or game.status in {"downloading", "checking", "queued"}:
                 continue
-            if game.status == "downloaded" and game.progress == 100.0:
+            if game.status == "downloaded" and game.progress == 100.0 and game.verification_source:
                 continue
             self.update_game(
                 game.key,
@@ -108,6 +108,8 @@ class SQLiteLibraryStore(LibraryStore):
                 update_available=False,
                 last_checked_at=game.last_checked_at or when,
                 message="SteamPrefill reports this app as previously downloaded.",
+                verification_source="provider_history",
+                verified_at=when,
             )
             changed += 1
         return changed
@@ -141,7 +143,8 @@ class SQLiteLibraryStore(LibraryStore):
                                last_downloaded_job_id=job_id or game.last_downloaded_job_id,
                                update_available=False, last_checked_at=now, speed=None,
                                eta=None, queue_position=None,
-                               message="Already up to date at the last check.")
+                               message="Already up to date at the last check.",
+                               verification_source="steam_check", verified_at=now)
                 touched_activity = True
             if name_key in completed:
                 completed_download = downloaded_for.get(name_key) or total_for.get(name_key) or game.downloaded
@@ -152,7 +155,8 @@ class SQLiteLibraryStore(LibraryStore):
                                last_downloaded_job_id=job_id or game.last_downloaded_job_id,
                                update_available=False, last_checked_at=now,
                                last_prefilled_at=now, speed=None, eta=None,
-                               queue_position=None, message="Downloaded and up to date.")
+                               queue_position=None, message="Downloaded and up to date.",
+                               verification_source="observed_download", verified_at=now)
                 touched_activity = True
             if name_key in failed:
                 changes.update(status="failed", speed=None, eta=None,

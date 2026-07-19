@@ -1646,6 +1646,8 @@ async def sync_library_activity(*, deep_scan: bool = False) -> None:
             speed=None,
             eta=None,
             message="Checked and up to date at the last check.",
+            verification_source=("observed_download" if downloaded_this_run else "steam_check"),
+            verified_at=finished,
         )
     elif latest.state in {"failed", "stopped", "interrupted"}:
         finished = latest.finished_at or utc_now()
@@ -2127,6 +2129,42 @@ async def prefill_history() -> list[HistoryRecord]:
     return history_store.list()
 
 
+async def scan_historical_provider_activity() -> tuple[int, str]:
+    """Recover game completions visible in retained target-container logs."""
+    before = {
+        game.app_id: (game.status, game.verification_source)
+        for game in library_store.list_games()
+        if game.app_id is not None
+    }
+    try:
+        output = await read_target_container_output(50000)
+    except Exception as error:
+        raise HTTPException(status_code=502, detail=f"Unable to read retained provider logs: {error}") from error
+    snapshot = parse_progress_snapshot(output)
+    library_store.apply_progress(snapshot, full_run=False, job_id=None)
+    after = {game.app_id: game for game in library_store.list_games() if game.app_id is not None}
+    recovered = sum(
+        1
+        for app_id, game in after.items()
+        if game.status == "downloaded"
+        and before.get(app_id, (None, None))[0] != "downloaded"
+    )
+    state_database.append_event(
+        "library.history_scanned",
+        provider=provider.provider_id,
+        payload={
+            "recovered": recovered,
+            "completed_names_found": len(snapshot.completed_for),
+            "up_to_date_names_found": len(snapshot.up_to_date_for),
+        },
+    )
+    return recovered, (
+        f"Recovered {recovered} previously observed completion{'s' if recovered != 1 else ''} from retained logs."
+        if recovered
+        else "Historical scan completed, but no additional game completions could be proven from retained logs."
+    )
+
+
 @app.get("/api/library", response_model=LibraryResponse)
 async def library(refresh: bool = Query(default=False)) -> LibraryResponse:
     message = ""
@@ -2154,6 +2192,12 @@ async def refresh_library_metadata() -> LibraryResponse:
             if started else "No unresolved Steam metadata is currently due for refresh."
         ),
     )
+
+
+@app.post("/api/library/scan-history", response_model=LibraryResponse)
+async def scan_library_history() -> LibraryResponse:
+    _, message = await scan_historical_provider_activity()
+    return build_library_response(library_store, queue_store, message=message)
 
 
 def enqueue_library_games(app_ids: list[int]) -> tuple[int, list[str]]:
@@ -2225,6 +2269,33 @@ async def queue_library_games(request: BulkQueueRequest) -> LibraryResponse:
             if count
             else "Every selected game is already queued or running."
         ),
+    )
+
+
+@app.post("/api/library/games/{app_id}/mark-downloaded", response_model=LibraryResponse)
+async def mark_game_downloaded(app_id: int) -> LibraryResponse:
+    active_item = next(
+        (item for item in queue_store.active() if item.app_id == app_id),
+        None,
+    )
+    if active_item is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="Remove this game from the queue or wait for its current check to finish first.",
+        )
+    game = library_store.mark_manually_downloaded(app_id, utc_now())
+    if game is None:
+        raise HTTPException(status_code=404, detail="That Steam app is not in the selected library.")
+    state_database.append_event(
+        "game.manually_verified",
+        provider=game.provider,
+        app_id=game.app_id,
+        payload={"name": game.name, "message": game.message},
+    )
+    return build_library_response(
+        library_store,
+        queue_store,
+        message=f"Marked {game.name} as downloaded. This is a manual CacheDeck record and does not inspect every LANCache object.",
     )
 
 

@@ -70,7 +70,9 @@ class GameRecord(BaseModel):
     last_downloaded_job_id: str | None = None
     current_manifest_id: str | None = None
     target_manifest_id: str | None = None
-    message: str = "Selected for prefill."
+    message: str = "Selected for prefill, but LANCache presence has not been verified."
+    verification_source: str | None = None
+    verified_at: str | None = None
     metadata_attempts: int = 0
     metadata_retry_at: str | None = None
     metadata_error: str | None = None
@@ -336,6 +338,8 @@ class LibraryStore:
                         "speed": None,
                         "eta": None,
                         "message": "Checked and up to date at the last successful prefill.",
+                        "verification_source": "full_run",
+                        "verified_at": when,
                     }
                 )
                 games.append(game)
@@ -391,6 +395,8 @@ class LibraryStore:
                         eta=None,
                         queue_position=None,
                         message="Already up to date at the last check.",
+                        verification_source="steam_check",
+                        verified_at=now,
                     )
                 if name_key in completed_names:
                     completed_download = downloaded_for.get(name_key) or total_for.get(name_key) or game.downloaded
@@ -408,6 +414,8 @@ class LibraryStore:
                         eta=None,
                         queue_position=None,
                         message="Downloaded and up to date.",
+                        verification_source="observed_download",
+                        verified_at=now,
                     )
                 if name_key in failed_names:
                     changes.update(status="failed", speed=None, eta=None, message="The last prefill attempt failed.")
@@ -456,6 +464,8 @@ class LibraryStore:
                         "update_available": False,
                         "last_checked_at": game.last_checked_at or when,
                         "message": "SteamPrefill reports this app as previously downloaded.",
+                        "verification_source": "provider_history",
+                        "verified_at": when,
                     })
                     changed += 1
                 games.append(game)
@@ -463,6 +473,22 @@ class LibraryStore:
                 raw["games"] = [game.model_dump(mode="json") for game in games]
                 self._write_unlocked(raw)
             return changed
+
+    def mark_manually_downloaded(self, app_id: int, when: str) -> GameRecord | None:
+        return self.update_by_app_id(
+            app_id,
+            status="downloaded",
+            progress=100.0,
+            downloaded=None,
+            total=None,
+            speed=None,
+            eta=None,
+            queue_position=None,
+            update_available=False,
+            verified_at=when,
+            verification_source="manual",
+            message="Manually marked as present in LANCache. CacheDeck has not independently verified every cached object.",
+        )
 
     def forget_status(self, app_id: int) -> GameRecord | None:
         return self.update_by_app_id(
@@ -479,7 +505,9 @@ class LibraryStore:
             last_prefilled_at=None,
             last_downloaded=None,
             last_downloaded_job_id=None,
-            message="CacheDeck status forgotten. The LANCache files were not deleted.",
+            verification_source=None,
+            verified_at=None,
+            message="CacheDeck status forgotten. LANCache presence is unverified; no cache data was deleted.",
         )
 
     def save_metadata(

@@ -6,7 +6,7 @@ provider is an existing
 CacheDeck now owns its game catalogue, queue, run history and structured event
 state instead of treating terminal output as its database.
 
-Version 0.7.2 is the hardened compatibility foundation for CacheDeck's native Steam prefill engine. It
+Version 0.7.3 is the hardened compatibility foundation for CacheDeck's native Steam prefill engine. It
 keeps SteamPrefill as the working compatibility provider, so existing downloads,
 schedules and authentication continue to work while the native provider is
 built incrementally.
@@ -210,7 +210,7 @@ templates/cachedeck.xml
 Before public submission:
 
 1. Push the repository to GitHub.
-2. Tag the release, for example `v0.7.2`.
+2. Tag the release, for example `v0.7.3`.
 3. Confirm the test and Docker-build jobs succeed.
 4. Make the `ghcr.io/darmachd/cachedeck` package public.
 5. Test a clean install and an upgrade from v0.6.2.
@@ -261,3 +261,7 @@ MIT. Copyright © 2026 Danny.
 
 Bundled third-party browser assets are documented in
 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
+
+### Verification states
+
+CacheDeck uses **Unverified** when it has no reliable evidence that a selected game is currently present in LANCache. A downloaded status records its source: observed download, Steam check, successful full run, imported provider history, or a manual user confirmation. Manual confirmation does not inspect every cached object.

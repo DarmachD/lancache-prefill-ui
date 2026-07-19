@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.7.3
+
+- Renamed the misleading **Not downloaded** state to **Unverified**.
+- Added manual per-game **Mark as downloaded** records with a visible verification source.
+- Added **Scan historical logs** to recover completions still visible in retained SteamPrefill logs.
+- Added **Verify unverified** to queue targeted Steam checks for unresolved library state.
+- Added verification-source labels for observed downloads, Steam checks, full runs, provider history and manual records.
+- Rebuilt the Activity tab rows with separate event-type, timestamp and detail columns plus responsive mobile spacing.
+- Changed Activity filtering to update after typing rather than requiring focus loss.
+
 ## 0.7.2
 
 - Fixed the GitHub Actions HTTP smoke test to wait for Docker health before querying the API.
