@@ -499,6 +499,7 @@
   <nav class="view-tabs" aria-label="CacheDeck views">
     <button id="dashboard-tab" class="view-tab active" type="button" data-view="dashboard">Dashboard</button>
     <button id="games-tab" class="view-tab" type="button" data-view="games">Games <span id="games-tab-count"></span></button>
+    <button id="activity-tab" class="view-tab" type="button" data-view="activity">Activity</button>
   </nav>
 
   <div id="dashboard-view" class="view-panel active">
@@ -594,6 +595,7 @@
           <div class="stat"><dt>Depot / manifest records</dt><dd id="engine-catalogue">—</dd></div>
           <div class="stat"><dt>v0.6 state import</dt><dd id="engine-migration">—</dd></div>
         </dl>
+        <div class="button-row"><button id="backup-database" type="button">Backup database</button><button id="repair-engine" type="button">Repair state</button></div>
       </div>
 
       <div class="card">
@@ -632,6 +634,17 @@
     </aside>
   </div>
   </div>
+
+
+  <section id="activity-view" class="view-panel" aria-labelledby="activity-tab">
+    <div class="card">
+      <div class="card-heading"><h2>Structured activity</h2><button id="refresh-activity" type="button">Refresh</button></div>
+      <div class="library-controls" style="position:static">
+        <label>Event type<input id="activity-filter" type="search" placeholder="e.g. game.status_changed"></label>
+      </div>
+      <div id="activity-list" class="diagnostic-list"><span class="muted">Open this tab to load recent engine events.</span></div>
+    </div>
+  </section>
 
   <section id="games-view" class="view-panel" aria-labelledby="games-tab">
     <div class="card">
@@ -1202,6 +1215,36 @@
   }
 
 
+  async function updateActivity() {
+    const list = $("activity-list");
+    const eventType = $("activity-filter").value.trim();
+    try {
+      const params = new URLSearchParams({ limit: "200" });
+      if (eventType) params.set("event_type", eventType);
+      const response = await fetch(`/api/engine/events?${params}`, { cache: "no-store" });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || "Unable to load activity.");
+      list.innerHTML = "";
+      if (!data.length) { list.innerHTML = '<span class="muted">No matching events.</span>'; return; }
+      for (const event of data) {
+        const row = document.createElement("div");
+        row.className = "diagnostic-item";
+        const details = event.payload && (event.payload.name || event.payload.message || event.payload.queue_id || "");
+        row.innerHTML = `<strong>${escapeHtml(event.event_type)}</strong><span>${escapeHtml(formatTime(event.created_at))}${details ? ` · ${escapeHtml(details)}` : ""}</span>`;
+        list.appendChild(row);
+      }
+    } catch (error) { list.innerHTML = `<span class="failed">${escapeHtml(error.message)}</span>`; }
+  }
+
+  async function enginePost(path, successText) {
+    const response = await fetch(path, { method: "POST" });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || "Action failed.");
+    showToast(successText || data.message || "Completed.");
+    updateEngine();
+    return data;
+  }
+
   function switchView(viewName) {
     document.querySelectorAll(".view-tab").forEach((button) => {
       button.classList.toggle("active", button.dataset.view === viewName);
@@ -1210,6 +1253,7 @@
       panel.classList.toggle("active", panel.id === `${viewName}-view`);
     });
     if (viewName === "games" && !libraryLoaded) loadLibrary(false);
+    if (viewName === "activity") updateActivity();
   }
 
   function parseSizeBytes(value) {
@@ -1634,6 +1678,10 @@
   $("library-refresh").addEventListener("click", () => loadLibrary(true));
   $("library-metadata").addEventListener("click", refreshLibraryMetadata);
   $("library-check-all").addEventListener("click", checkAllLibraryGames);
+  $("refresh-activity").addEventListener("click", updateActivity);
+  $("activity-filter").addEventListener("change", updateActivity);
+  $("backup-database").addEventListener("click", async () => { try { const data = await enginePost("/api/engine/backup", "Database backup created."); showToast(`Backup: ${data.path}`); } catch (e) { showToast(e.message, true); } });
+  $("repair-engine").addEventListener("click", async () => { try { await enginePost("/api/engine/repair", "Engine state repaired."); } catch (e) { showToast(e.message, true); } });
   $("library-search").addEventListener("input", renderLibrary);
   $("library-filter").addEventListener("change", renderLibrary);
   $("library-sort").addEventListener("change", renderLibrary);

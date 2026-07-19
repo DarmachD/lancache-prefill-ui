@@ -34,6 +34,27 @@ class SQLiteLibraryStore(LibraryStore):
             value = raw.get(source)
             self.database.set_meta(target, str(value) if value else None)
 
+    def update_game(self, key: str, **changes: object):
+        with self._lock:
+            game = next((item for item in self.list_games() if item.key == key), None)
+            if game is None:
+                return None
+            updated = game.model_copy(update=changes)
+            self.database.upsert_game_payload(updated.model_dump(mode="json"))
+            if changes.get("last_downloaded_job_id"):
+                self.database.set_meta("library.last_activity_job_id", str(changes["last_downloaded_job_id"]))
+            return updated
+
+    def update_by_app_id(self, app_id: int, **changes: object):
+        game = next((item for item in self.list_games() if item.app_id == app_id), None)
+        return self.update_game(game.key, **changes) if game else None
+
+    def update_by_name(self, name: str, **changes: object):
+        from app.library import normalise_name
+        target = normalise_name(name)
+        game = next((item for item in self.list_games() if normalise_name(item.name) == target), None)
+        return self.update_game(game.key, **changes) if game else None
+
 
 class SQLiteQueueStore(QueueStore):
     """QueueStore-compatible adapter backed by CacheDeck's SQLite database."""

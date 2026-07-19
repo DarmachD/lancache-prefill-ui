@@ -1,3 +1,12 @@
+## 0.7.1
+
+- Reduced SQLite write amplification for single-game state updates.
+- Added startup recovery for queue items stranded before a job ID was assigned.
+- Added retryable legacy JSON migration and ordered schema migration groundwork.
+- Added same-origin protection for state-changing HTTP requests.
+- Added filterable structured Activity view, database backups and engine repair controls.
+- Prevented duplicate metadata refresh workers.
+
 # Changelog
 
 ## 0.7.0

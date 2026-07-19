@@ -20,8 +20,8 @@ from typing import Any, Final, Literal
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 
 from app.database import SCHEMA_VERSION, StateDatabase
@@ -293,6 +293,8 @@ class HistoryStore:
 
 
 state_database = StateDatabase(DATABASE_FILE)
+metadata_refresh_task: asyncio.Task[None] | None = None
+metadata_refresh_lock = asyncio.Lock()
 history_store = HistoryStore(HISTORY_FILE, HISTORY_LIMIT, state_database)
 library_store = SQLiteLibraryStore(state_database)
 queue_store = SQLiteQueueStore(state_database)
@@ -1371,9 +1373,10 @@ async def metadata_refresh_worker() -> None:
 
 
 def start_metadata_refresh() -> None:
-    if library_store.metadata_refreshing:
+    global metadata_refresh_task
+    if metadata_refresh_task is not None and not metadata_refresh_task.done():
         return
-    asyncio.create_task(metadata_refresh_worker())
+    metadata_refresh_task = asyncio.create_task(metadata_refresh_worker())
 
 
 async def sync_library_activity(*, deep_scan: bool = False) -> None:
@@ -1576,6 +1579,7 @@ async def lifespan(_: FastAPI):
         queue_path=QUEUE_FILE,
         history_path=HISTORY_FILE,
     )
+    state_database.reconcile_queue()
     recovery_task = asyncio.create_task(auto_recovery_loop())
     queue_task = asyncio.create_task(game_queue_loop())
     try:
@@ -1596,6 +1600,28 @@ app = FastAPI(
     redoc_url=None,
     lifespan=lifespan,
 )
+
+
+def request_origin_allowed(request: Request) -> bool:
+    origin = (request.headers.get("origin") or "").strip().rstrip("/")
+    if not origin:
+        return True
+    normalised = origin.casefold()
+    if "*" in ALLOWED_ORIGINS or normalised in ALLOWED_ORIGINS:
+        return True
+    try:
+        origin_host = urlsplit(origin).netloc.casefold()
+    except ValueError:
+        return False
+    request_host = (request.headers.get("x-forwarded-host") or request.headers.get("host") or "").split(",", 1)[0].strip().casefold()
+    return bool(origin_host and request_host and origin_host == request_host)
+
+
+@app.middleware("http")
+async def protect_state_changing_requests(request: Request, call_next):
+    if request.method in {"POST", "PUT", "PATCH", "DELETE"} and not request_origin_allowed(request):
+        return JSONResponse(status_code=403, content={"detail": "Request origin is not allowed."})
+    return await call_next(request)
 
 
 @app.get("/", include_in_schema=False)
@@ -1663,8 +1689,39 @@ async def engine_status() -> EngineStatus:
 @app.get("/api/engine/events", response_model=list[EngineEvent])
 async def engine_events(
     limit: int = Query(default=100, ge=1, le=1000),
+    event_type: str | None = None,
+    app_id: int | None = None,
+    job_id: str | None = None,
 ) -> list[EngineEvent]:
-    return [EngineEvent.model_validate(item) for item in state_database.list_events(limit)]
+    return [
+        EngineEvent.model_validate(item)
+        for item in state_database.list_events(
+            limit, event_type=event_type, app_id=app_id, job_id=job_id
+        )
+    ]
+
+
+@app.post("/api/engine/migration/retry")
+async def retry_legacy_migration() -> dict[str, Any]:
+    state_database.set_meta("legacy_json_import_v1", None)
+    return state_database.migrate_legacy_json(
+        library_path=LIBRARY_FILE,
+        queue_path=QUEUE_FILE,
+        history_path=HISTORY_FILE,
+    )
+
+
+@app.post("/api/engine/repair")
+async def repair_engine_state() -> dict[str, Any]:
+    result = state_database.reconcile_queue()
+    return {"ok": True, **result}
+
+
+@app.post("/api/engine/backup")
+async def backup_engine_database() -> dict[str, Any]:
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    destination = CONFIG_DIR / "backups" / f"cachedeck-{stamp}.db"
+    return state_database.backup_to(destination)
 
 
 @app.get("/api/logs")

@@ -175,5 +175,49 @@ class DatabaseStoreTests(unittest.TestCase):
             )
 
 
+class DatabaseHardeningTests(unittest.TestCase):
+    def test_failed_legacy_import_can_be_retried(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            library = root / "library.json"
+            queue = root / "game-queue.json"
+            history = root / "history.json"
+            library.write_text("{broken", encoding="utf-8")
+            database = StateDatabase(root / "cachedeck.db")
+            first = database.migrate_legacy_json(
+                library_path=library, queue_path=queue, history_path=history
+            )
+            self.assertFalse(first["completed"])
+            library.write_text(json.dumps({"games": []}), encoding="utf-8")
+            second = database.migrate_legacy_json(
+                library_path=library, queue_path=queue, history_path=history
+            )
+            self.assertTrue(second["completed"])
+
+    def test_reconciles_stranded_running_queue_item(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = StateDatabase(Path(directory) / "cachedeck.db")
+            queue = SQLiteQueueStore(database)
+            queue.enqueue(GameQueueItem(
+                queue_id="q1", app_id=730, app_name="Counter-Strike 2",
+                requested_at="2026-07-18T00:00:00+00:00", state="running"
+            ))
+            result = database.reconcile_queue()
+            self.assertEqual(result["requeued"], 1)
+            self.assertEqual(queue.list()[0].state, "queued")
+
+    def test_database_backup_and_event_filtering(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            database = StateDatabase(root / "cachedeck.db")
+            database.append_event("game.progress", app_id=730)
+            database.append_event("queue.added", app_id=440)
+            backup = database.backup_to(root / "backups" / "cachedeck.db")
+            self.assertTrue(Path(backup["path"]).is_file())
+            events = database.list_events(event_type="game.progress", app_id=730)
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]["event_type"], "game.progress")
+
+
 if __name__ == "__main__":
     unittest.main()

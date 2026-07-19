@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 EVENT_RETENTION = 50_000
 
 
@@ -160,10 +160,24 @@ class StateDatabase:
                     );
                     """
                 )
+                current_row = connection.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
+                current_version = int(current_row["value"]) if current_row else 0
+                if current_version < 1:
+                    current_version = 1
+                if current_version < 2:
+                    connection.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_queue_provider_app_state "
+                        "ON queue_items(provider, app_id, state)"
+                    )
+                    connection.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_events_type_created "
+                        "ON events(event_type, id DESC)"
+                    )
+                    current_version = 2
                 connection.execute(
                     "INSERT INTO meta(key, value) VALUES('schema_version', ?) "
                     "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                    (str(SCHEMA_VERSION),),
+                    (str(current_version),),
                 )
             self._initialised = True
 
@@ -225,14 +239,34 @@ class StateDatabase:
         with self._lock, self.connection() as owned:
             return insert(owned)
 
-    def list_events(self, limit: int = 100) -> list[dict[str, Any]]:
+    def list_events(
+        self,
+        limit: int = 100,
+        *,
+        event_type: str | None = None,
+        app_id: int | None = None,
+        job_id: str | None = None,
+    ) -> list[dict[str, Any]]:
         self.initialize()
         limit = max(1, min(1000, limit))
+        clauses: list[str] = []
+        values: list[Any] = []
+        if event_type:
+            clauses.append("event_type = ?")
+            values.append(event_type)
+        if app_id is not None:
+            clauses.append("app_id = ?")
+            values.append(app_id)
+        if job_id:
+            clauses.append("job_id = ?")
+            values.append(job_id)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        values.append(limit)
         with self._lock, self.connection() as connection:
             rows = connection.execute(
                 "SELECT id, event_type, provider, app_id, job_id, payload, created_at "
-                "FROM events ORDER BY id DESC LIMIT ?",
-                (limit,),
+                f"FROM events{where} ORDER BY id DESC LIMIT ?",
+                values,
             ).fetchall()
         return [
             {
@@ -373,6 +407,65 @@ class StateDatabase:
                     connection=connection,
                 )
                 connection.execute("DELETE FROM games WHERE key = ?", (key,))
+
+    def upsert_game_payload(self, payload: dict[str, Any]) -> None:
+        self.initialize()
+        key = str(payload.get("key") or "").strip()
+        name = str(payload.get("name") or "").strip()
+        if not key or not name:
+            return
+        provider = str(payload.get("provider") or "steamprefill")
+        app_id = payload.get("app_id")
+        status = str(payload.get("status") or "selected")
+        selected = 1 if payload.get("selected", True) else 0
+        now = utc_now()
+        with self._lock, self.connection() as connection:
+            old = connection.execute("SELECT status, payload FROM games WHERE key = ?", (key,)).fetchone()
+            connection.execute(
+                """INSERT INTO games(key, provider, app_id, name, status, selected, payload, updated_at)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET provider=excluded.provider, app_id=excluded.app_id,
+                name=excluded.name, status=excluded.status, selected=excluded.selected,
+                payload=excluded.payload, updated_at=excluded.updated_at""",
+                (key, provider, app_id, name, status, selected, _json_dump(payload), now),
+            )
+            if old is not None and str(old["status"]) != status:
+                self.append_event("game.status_changed", provider=provider,
+                    app_id=app_id if isinstance(app_id, int) else None,
+                    job_id=payload.get("last_downloaded_job_id"),
+                    payload={"key": key, "name": name, "from": old["status"], "to": status,
+                             "progress": payload.get("progress"), "message": payload.get("message")},
+                    connection=connection)
+
+    def backup_to(self, destination: Path) -> dict[str, Any]:
+        self.initialize()
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with self._lock, sqlite3.connect(self.path) as source, sqlite3.connect(destination) as target:
+            source.backup(target)
+        size = destination.stat().st_size
+        completed_at = utc_now()
+        self.set_meta("database.last_backup_at", completed_at)
+        self.set_meta("database.last_backup_path", str(destination))
+        self.append_event("database.backup", payload={"path": str(destination), "size_bytes": size})
+        return {"path": str(destination), "size_bytes": size, "completed_at": completed_at}
+
+    def reconcile_queue(self) -> dict[str, int]:
+        self.initialize()
+        recovered = interrupted = 0
+        now = utc_now()
+        with self._lock, self.connection() as connection:
+            rows = connection.execute("SELECT queue_id, payload FROM queue_items WHERE state = 'running'").fetchall()
+            for row in rows:
+                payload = _json_load(row["payload"], {})
+                if payload.get("job_id"):
+                    continue
+                payload.update({"state": "queued", "started_at": None, "message": "Recovered after CacheDeck restart."})
+                connection.execute("UPDATE queue_items SET state='queued', payload=?, updated_at=? WHERE queue_id=?",
+                                   (_json_dump(payload), now, row["queue_id"]))
+                recovered += 1
+            if recovered:
+                self.append_event("queue.recovered", payload={"requeued": recovered}, connection=connection)
+        return {"requeued": recovered, "interrupted": interrupted}
 
     def list_queue_payloads(self) -> list[dict[str, Any]]:
         self.initialize()
@@ -652,7 +745,7 @@ class StateDatabase:
             errors.append(f"history.json: {exc}")
 
         result = {
-            "completed": True,
+            "completed": not errors,
             "ok": not errors,
             "completed_at": utc_now(),
             "counts": counts,
