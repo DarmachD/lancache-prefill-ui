@@ -126,6 +126,26 @@ class DatabaseStoreTests(unittest.TestCase):
             self.assertIn("game.identity_resolved", event_types)
             self.assertNotIn("game.unselected", event_types)
 
+    def test_incremental_completion_updates_sqlite_game(self):
+        from app.library import parse_progress_snapshot
+
+        with tempfile.TemporaryDirectory() as directory:
+            database = StateDatabase(Path(directory) / "cachedeck.db")
+            store = SQLiteLibraryStore(database)
+            store.replace_selected(
+                [SelectedApp(app_id=730, name="Counter-Strike 2")],
+                "2026-07-18T00:00:00+00:00",
+            )
+            snapshot = parse_progress_snapshot(
+                "Finished downloading 34.4 GiB in 00:02:00",
+                initial_app_name="Counter-Strike 2",
+            )
+            store.apply_progress(snapshot, job_id="job-1")
+            game = store.list_games()[0]
+            self.assertEqual(game.status, "downloaded")
+            self.assertEqual(game.progress, 100.0)
+            self.assertEqual(database.get_meta("library.last_activity_job_id"), "job-1")
+
     def test_queue_is_persistent_and_deduplicated(self):
         with tempfile.TemporaryDirectory() as directory:
             database = StateDatabase(Path(directory) / "cachedeck.db")

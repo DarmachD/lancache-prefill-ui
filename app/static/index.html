@@ -390,6 +390,7 @@
       background: #080d15;
     }
     .game-progress > span { display: block; width: 0; height: 100%; border-radius: inherit; background: var(--accent); transition: width .25s ease; }
+    .game-progress.unknown { background: repeating-linear-gradient(135deg, var(--panel-2), var(--panel-2) 8px, var(--border) 8px, var(--border) 16px); }
     .game-progress-meta { display: flex; justify-content: space-between; gap: 10px; margin-top: 5px; color: var(--muted); font-size: .75rem; }
     .game-actions { display: grid; gap: 8px; min-width: 150px; }
     .game-actions > button { width: 100%; }
@@ -1431,11 +1432,21 @@
       const progressTrack = document.createElement("div");
       progressTrack.className = "game-progress";
       progressTrack.setAttribute("role", "progressbar");
-      const percent = Math.max(0, Math.min(100, Number(game.progress || (game.status === "downloaded" ? 100 : 0))));
-      progressTrack.setAttribute("aria-valuenow", String(Math.round(percent)));
+      const parsedProgress = game.progress === null || game.progress === undefined ? null : Number(game.progress);
+      const progressKnown = game.status === "downloaded" || Number.isFinite(parsedProgress);
+      const percent = game.status === "downloaded"
+        ? 100
+        : (progressKnown ? Math.max(0, Math.min(100, parsedProgress)) : 0);
       progressTrack.setAttribute("aria-valuemin", "0");
       progressTrack.setAttribute("aria-valuemax", "100");
-      progressTrack.setAttribute("aria-label", `${game.name} ${Math.round(percent)} percent`);
+      if (progressKnown) {
+        progressTrack.setAttribute("aria-valuenow", String(Math.round(percent)));
+        progressTrack.setAttribute("aria-label", `${game.name} ${Math.round(percent)} percent`);
+      } else {
+        progressTrack.classList.add("unknown");
+        progressTrack.setAttribute("aria-valuetext", "Progress unknown");
+        progressTrack.setAttribute("aria-label", `${game.name} progress unknown`);
+      }
       const progressFill = document.createElement("span");
       progressFill.style.width = `${percent}%`;
       progressTrack.appendChild(progressFill);
@@ -1444,7 +1455,9 @@
       const left = document.createElement("span");
       left.textContent = game.status === "downloaded"
         ? "Downloaded to LANCache (last verified)"
-        : (game.downloaded && game.total ? `${game.downloaded} / ${game.total}` : `${Math.round(percent)}%`);
+        : (game.downloaded && game.total
+          ? `${game.downloaded} / ${game.total}`
+          : (progressKnown ? `${Math.round(percent)}%` : "Progress unknown"));
       const right = document.createElement("span");
       right.textContent = [game.speed, game.eta ? `ETA ${game.eta}` : null].filter(Boolean).join(" · ") ||
         (game.last_checked_at ? `Checked ${formatTime(game.last_checked_at)}` : "Not checked yet");
@@ -1502,10 +1515,12 @@
     updateLibrarySelectionSummary();
   }
 
-  async function loadLibrary(refresh = false) {
+  async function loadLibrary(refresh = false, silent = false) {
     if (libraryRequestRunning) return;
     libraryRequestRunning = true;
-    $("library-message").textContent = refresh ? "Refreshing selected apps from SteamPrefill…" : "Loading selected games…";
+    if (!silent && (refresh || !libraryLoaded)) {
+      $("library-message").textContent = refresh ? "Refreshing selected apps from SteamPrefill…" : "Loading selected games…";
+    }
     try {
       const response = await fetch(refresh ? "/api/library/refresh" : "/api/library", {
         method: refresh ? "POST" : "GET",
@@ -1517,7 +1532,7 @@
       libraryLoaded = true;
       renderLibrary();
       clearTimeout(libraryMetadataPoll);
-      if (data.metadata_refreshing) libraryMetadataPoll = setTimeout(() => loadLibrary(false), 3500);
+      if (data.metadata_refreshing) libraryMetadataPoll = setTimeout(() => loadLibrary(false, true), 3500);
     } catch (error) {
       $("library-message").textContent = error.message;
       $("library-list").innerHTML = `<div class="library-empty">${escapeHtml(error.message)}</div>`;
@@ -1535,7 +1550,7 @@
       renderLibrary();
       showToast("Artwork refresh started.");
       clearTimeout(libraryMetadataPoll);
-      libraryMetadataPoll = setTimeout(() => loadLibrary(false), 2000);
+      libraryMetadataPoll = setTimeout(() => loadLibrary(false, true), 2000);
     } catch (error) {
       showToast(error.message);
     }
@@ -1682,11 +1697,25 @@
   $("activity-filter").addEventListener("change", updateActivity);
   $("backup-database").addEventListener("click", async () => { try { const data = await enginePost("/api/engine/backup", "Database backup created."); showToast(`Backup: ${data.path}`); } catch (e) { showToast(e.message, true); } });
   $("repair-engine").addEventListener("click", async () => { try { await enginePost("/api/engine/repair", "Engine state repaired."); } catch (e) { showToast(e.message, true); } });
-  $("library-search").addEventListener("input", renderLibrary);
-  $("library-filter").addEventListener("change", renderLibrary);
-  $("library-sort").addEventListener("change", renderLibrary);
+  function saveLibraryViewPreferences() {
+    try {
+      localStorage.setItem("cachedeck.librarySearch", $("library-search").value);
+      localStorage.setItem("cachedeck.libraryFilter", $("library-filter").value);
+      localStorage.setItem("cachedeck.librarySort", $("library-sort").value);
+      localStorage.setItem("cachedeck.libraryUpdatesOnly", libraryUpdatesOnly ? "true" : "false");
+    } catch (_) {}
+  }
+  try {
+    $("library-search").value = localStorage.getItem("cachedeck.librarySearch") || "";
+    $("library-filter").value = localStorage.getItem("cachedeck.libraryFilter") || "all";
+    $("library-sort").value = localStorage.getItem("cachedeck.librarySort") || "name";
+    libraryUpdatesOnly = localStorage.getItem("cachedeck.libraryUpdatesOnly") === "true";
+  } catch (_) {}
+  $("library-search").addEventListener("input", () => { saveLibraryViewPreferences(); renderLibrary(); });
+  $("library-filter").addEventListener("change", () => { saveLibraryViewPreferences(); renderLibrary(); });
+  $("library-sort").addEventListener("change", () => { saveLibraryViewPreferences(); renderLibrary(); });
   $("library-density").addEventListener("click", () => setLibraryDensity(!document.body.classList.contains("library-compact")));
-  $("library-updates-only").addEventListener("click", () => { libraryUpdatesOnly = !libraryUpdatesOnly; renderLibrary(); });
+  $("library-updates-only").addEventListener("click", () => { libraryUpdatesOnly = !libraryUpdatesOnly; saveLibraryViewPreferences(); renderLibrary(); });
   $("library-retry-failed").addEventListener("click", () => {
     const failedIds = (libraryData && libraryData.games || []).filter((game) => game.status === "failed" && game.app_id).map((game) => game.app_id);
     queueBulkGames(failedIds, "failed games");
@@ -1778,7 +1807,7 @@
   window.setInterval(updateSchedule, 60000);
   window.setInterval(updateHistory, 60000);
   window.setInterval(() => {
-    if ($("games-view").classList.contains("active") && libraryLoaded) loadLibrary(false);
+    if ($("games-view").classList.contains("active") && libraryLoaded) loadLibrary(false, true);
   }, 5000);
 </script>
 </body>

@@ -11,6 +11,7 @@ from app.library import (
     parse_progress_snapshot,
     parse_selected_app_ids_config,
     parse_selected_apps_status,
+    parse_successfully_downloaded_app_ids,
 )
 
 
@@ -56,6 +57,27 @@ Updated | Up To Date
         self.assertTrue(output_indicates_successful_prefill(output))
         self.assertFalse(output_indicates_successful_prefill("Steam login failed"))
 
+
+    def test_incremental_finished_line_uses_previous_active_game(self):
+        progress = parse_progress_snapshot(
+            "Finished downloading 34.4 GiB in 00:02:00 - 2.3 Gbit/s",
+            initial_app_name="Counter-Strike 2",
+        )
+        self.assertIn("Counter-Strike 2", progress.completed_for)
+        self.assertEqual(progress.progress, 100.0)
+
+    def test_progress_is_unknown_until_provider_reports_it(self):
+        progress = parse_progress_snapshot("[1:13:11 AM] Starting Counter-Strike 2")
+        self.assertIsNone(progress.progress)
+
+    def test_only_explicit_app_success_is_imported_from_provider_state(self):
+        payload = '''[
+          {"appId": 730, "depotId": 731, "completed": true},
+          {"depotId": 570, "manifestId": "123"},
+          {"app_id": 440, "status": "downloaded"}
+        ]'''
+        self.assertEqual(parse_successfully_downloaded_app_ids(payload), {730, 440})
+
     def test_parses_live_progress(self):
         output = """
 [1:13:11 AM] Starting Age of Empires IV: Anniversary Edition
@@ -84,6 +106,21 @@ class StoreTests(unittest.TestCase):
             )
             self.assertEqual(games[0].status, "downloaded")
             self.assertEqual(games[0].download_size, "35.0 GiB")
+
+    def test_refresh_preserves_live_unknown_progress_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = LibraryStore(Path(directory) / "library.json")
+            store.replace_selected(
+                [SelectedApp(app_id=730, name="Counter-Strike 2")],
+                "2026-07-18T00:00:00+00:00",
+            )
+            store.update_by_app_id(730, status="downloading", progress=None)
+            games = store.replace_selected(
+                [SelectedApp(app_id=730, name="Steam app 730")],
+                "2026-07-18T01:00:00+00:00",
+            )
+            self.assertEqual(games[0].status, "downloading")
+            self.assertIsNone(games[0].progress)
 
     def test_config_placeholder_does_not_overwrite_resolved_name(self):
         with tempfile.TemporaryDirectory() as directory:

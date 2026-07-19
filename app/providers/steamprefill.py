@@ -62,6 +62,13 @@ class SteamPrefillProvider(PrefillProvider):
             "/Config/selectedAppsToPrefill.json",
         )
 
+    @property
+    def downloaded_state_candidates(self) -> tuple[str, ...]:
+        return (
+            "./Config/successfullyDownloadedDepots.json",
+            "/Config/successfullyDownloadedDepots.json",
+        )
+
     def managed_prefill_command(self, app_id: int | None = None) -> str:
         command = self._command
         parts = shlex.split(command)

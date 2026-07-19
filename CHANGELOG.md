@@ -1,3 +1,20 @@
+# Changelog
+
+## 0.7.2
+
+- Fixed the GitHub Actions HTTP smoke test to wait for Docker health before querying the API.
+- Removed the stale hard-coded schema-v1 assertion; the smoke test now verifies that `/api/health` and `/api/engine` agree on the current schema version.
+
+- Stopped restarting Steam metadata resolution on every Games-view poll.
+- Added exponential metadata retry backoff and a force-refresh path.
+- Added a persistent incremental activity-log cursor with active-game continuity.
+- Preserved live, queued and completed game state across selected-library refreshes.
+- Added immediate structured completion events when SteamPrefill output identifies a finished game.
+- Added cautious import of explicit app-level success records from SteamPrefill provider state.
+- Changed unavailable per-game progress from misleading 0% to **Progress unknown**.
+- Prevented silent background polling from flashing the loading message.
+- Persisted Games-view search, filter, sort and updates-only preferences.
+
 ## 0.7.1
 
 - Reduced SQLite write amplification for single-game state updates.
@@ -6,8 +23,6 @@
 - Added same-origin protection for state-changing HTTP requests.
 - Added filterable structured Activity view, database backups and engine repair controls.
 - Prevented duplicate metadata refresh workers.
-
-# Changelog
 
 ## 0.7.0
 

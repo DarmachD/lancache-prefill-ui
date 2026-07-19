@@ -57,7 +57,7 @@ class GameRecord(BaseModel):
     store_url: str | None = None
     selected: bool = True
     status: GameStatus = "selected"
-    progress: float = 0.0
+    progress: float | None = None
     downloaded: str | None = None
     total: str | None = None
     speed: str | None = None
@@ -71,6 +71,10 @@ class GameRecord(BaseModel):
     current_manifest_id: str | None = None
     target_manifest_id: str | None = None
     message: str = "Selected for prefill."
+    metadata_attempts: int = 0
+    metadata_retry_at: str | None = None
+    metadata_error: str | None = None
+    metadata_resolved_at: str | None = None
 
 
 class GameQueueItem(BaseModel):
@@ -228,10 +232,8 @@ class LibraryStore:
                         "store_url": previous.store_url or (steam_store_url(resolved_app_id) if resolved_app_id else None),
                         "selected": True,
                     }
-                    if previous.status in {"queued", "checking", "downloading"}:
-                        update["status"] = "selected"
-                        update["progress"] = 0.0
-                        update["queue_position"] = None
+                    # A catalogue refresh must never erase live or completed state. Queue
+                    # reconciliation and activity parsing own those transitions.
                     game = previous.model_copy(update=update)
                 else:
                     game = GameRecord(
@@ -413,7 +415,10 @@ class LibraryStore:
                 if current and name_key == current and not is_finished:
                     changes.update(
                         status="downloading",
-                        progress=max(0.0, min(100.0, snapshot.progress or 0.0)),
+                        progress=(
+                            max(0.0, min(100.0, snapshot.progress))
+                            if snapshot.progress is not None else None
+                        ),
                         downloaded=snapshot.downloaded,
                         total=snapshot.total,
                         speed=snapshot.speed,
@@ -431,11 +436,39 @@ class LibraryStore:
             raw["games"] = [g.model_dump(mode="json") for g in games]
             self._write_unlocked(raw)
 
+    def mark_provider_verified(self, app_ids: set[int], when: str) -> int:
+        """Import explicit app-level success evidence from the active provider."""
+        if not app_ids:
+            return 0
+        with self._lock:
+            raw = self._read_unlocked()
+            games: list[GameRecord] = []
+            changed = 0
+            for item in raw.get("games", []):
+                try:
+                    game = GameRecord.model_validate(item)
+                except Exception:
+                    continue
+                if game.app_id in app_ids and game.status not in {"downloading", "checking", "queued"}:
+                    game = game.model_copy(update={
+                        "status": "downloaded",
+                        "progress": 100.0,
+                        "update_available": False,
+                        "last_checked_at": game.last_checked_at or when,
+                        "message": "SteamPrefill reports this app as previously downloaded.",
+                    })
+                    changed += 1
+                games.append(game)
+            if changed:
+                raw["games"] = [game.model_dump(mode="json") for game in games]
+                self._write_unlocked(raw)
+            return changed
+
     def forget_status(self, app_id: int) -> GameRecord | None:
         return self.update_by_app_id(
             app_id,
             status="selected",
-            progress=0.0,
+            progress=None,
             downloaded=None,
             total=None,
             speed=None,
@@ -474,6 +507,10 @@ class LibraryStore:
                             "name": name or game.name,
                             "image_url": image_url,
                             "store_url": store_url,
+                            "metadata_attempts": 0,
+                            "metadata_retry_at": None,
+                            "metadata_error": None,
+                            "metadata_resolved_at": utc_now(),
                         }
                     )
                 games.append(game)
@@ -720,6 +757,54 @@ def parse_selected_app_ids_config(output: str) -> list[int]:
     return result
 
 
+def parse_successfully_downloaded_app_ids(output: str) -> set[int]:
+    """Extract only explicit app-level success records from SteamPrefill state.
+
+    Current SteamPrefill primarily stores depot -> manifest history in
+    ``successfullyDownloadedDepots.json``. Some builds/wrappers include app IDs
+    and an explicit successful/completed flag. CacheDeck accepts those records,
+    but deliberately refuses to guess an app from a bare depot ID.
+    """
+    text = clean_terminal_output(output).strip()
+    if not text:
+        return set()
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return set()
+
+    app_keys = {"appid", "app_id", "applicationid", "application_id"}
+    success_keys = {"success", "successful", "completed", "complete", "downloaded", "uptodate", "up_to_date"}
+    success_states = {"success", "successful", "completed", "complete", "downloaded", "up_to_date", "uptodate"}
+    result: set[int] = set()
+
+    def walk(value: object) -> None:
+        if isinstance(value, list):
+            for item in value:
+                walk(item)
+            return
+        if not isinstance(value, dict):
+            return
+        lowered = {str(key).casefold(): item for key, item in value.items()}
+        raw_app_id = next((lowered[key] for key in app_keys if key in lowered), None)
+        explicit_success = any(lowered.get(key) is True for key in success_keys)
+        state = str(lowered.get("status") or lowered.get("state") or "").casefold().replace(" ", "_")
+        if state in success_states:
+            explicit_success = True
+        if raw_app_id is not None and explicit_success:
+            try:
+                app_id = int(raw_app_id)
+            except (TypeError, ValueError):
+                app_id = 0
+            if app_id > 0:
+                result.add(app_id)
+        for child in value.values():
+            walk(child)
+
+    walk(payload)
+    return result
+
+
 def dedupe_selected(items: list[SelectedApp]) -> list[SelectedApp]:
     seen: set[str] = set()
     result: list[SelectedApp] = []
@@ -732,7 +817,10 @@ def dedupe_selected(items: list[SelectedApp]) -> list[SelectedApp]:
     return result
 
 
-START_RE = re.compile(r"\bStarting\s+(?P<name>.+?)\s*$", re.I)
+START_RE = re.compile(
+    r"\bStarting(?:\s+(?:download(?:ing)?|prefill(?:ing)?))?\s+(?P<name>.+?)\s*$",
+    re.I,
+)
 FINISHED_DOWNLOAD_RE = re.compile(
     r"Finished\s+downloading\s+(?P<size>\d+(?:\.\d+)?\s*(?:[KMGTPE]i?B|bytes?))",
     re.I,
@@ -748,9 +836,16 @@ PROGRESS_RE = re.compile(
 )
 
 
-def parse_progress_snapshot(output: str) -> ProgressSnapshot:
+def parse_progress_snapshot(output: str, initial_app_name: str | None = None) -> ProgressSnapshot:
+    """Parse SteamPrefill output, optionally continuing the previous active app.
+
+    SteamPrefill redraws progress and sometimes rotates/truncates Docker log tails.
+    Carrying the active app across incremental reads lets a later ``Finished
+    downloading`` line still be attributed correctly even when its ``Starting``
+    line is no longer in the current chunk.
+    """
     text = clean_terminal_output(output)
-    current: str | None = None
+    current: str | None = initial_app_name
     progress: float | None = None
     downloaded: str | None = None
     total: str | None = None
@@ -769,9 +864,15 @@ def parse_progress_snapshot(output: str) -> ProgressSnapshot:
             continue
         start_match = START_RE.search(line)
         if start_match:
-            current = start_match.group("name").strip()
-            progress = 0.0
-            downloaded = total = speed = eta = None
+            candidate = start_match.group("name").strip(" :-")
+            ignored_starts = (
+                "login", "steam session", "container", "cachedeck", "lancache",
+                "manifest", "metadata", "selected app", "application",
+            )
+            if candidate and not candidate.casefold().startswith(ignored_starts):
+                current = candidate
+                progress = None
+                downloaded = total = speed = eta = None
         progress_match = PROGRESS_RE.search(line)
         if progress_match and ("download" in line.casefold() or current):
             progress = float(progress_match.group("percent"))
@@ -964,7 +1065,10 @@ def build_library_response(
         downloading=sum(game.status in {"downloading", "checking"} for game in rendered),
         update_available=sum(game.status == "update_available" for game in rendered),
         failed=sum(game.status == "failed" for game in rendered),
-        unresolved=sum(game.app_id is None for game in rendered),
+        unresolved=sum(
+            game.app_id is None or is_placeholder_game_name(game.name, game.app_id)
+            for game in rendered
+        ),
         known_size_count=sum(parse_size_bytes(game.download_size) > 0 for game in rendered),
         total_size_bytes=sum(parse_size_bytes(game.download_size) for game in rendered),
         queue_remaining_bytes=queue_remaining_bytes,

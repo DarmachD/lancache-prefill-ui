@@ -39,7 +39,9 @@ from app.library import (
     parse_progress_snapshot,
     parse_selected_app_ids_config,
     parse_selected_apps_status,
+    parse_successfully_downloaded_app_ids,
     output_indicates_successful_prefill,
+    clean_terminal_output,
     parse_size_bytes,
     placeholder_game_name,
     is_placeholder_game_name,
@@ -295,6 +297,8 @@ class HistoryStore:
 state_database = StateDatabase(DATABASE_FILE)
 metadata_refresh_task: asyncio.Task[None] | None = None
 metadata_refresh_lock = asyncio.Lock()
+METADATA_RETRY_BASE_SECONDS: Final = 60
+METADATA_RETRY_MAX_SECONDS: Final = 6 * 60 * 60
 history_store = HistoryStore(HISTORY_FILE, HISTORY_LIMIT, state_database)
 library_store = SQLiteLibraryStore(state_database)
 queue_store = SQLiteQueueStore(state_database)
@@ -1193,6 +1197,42 @@ exit 44
         return []
     return parse_selected_app_ids_config(result.stdout)
 
+async def read_provider_downloaded_app_ids() -> set[int]:
+    candidates = getattr(provider, "downloaded_state_candidates", ())
+    if not candidates:
+        return set()
+    quoted = " ".join(shlex.quote(item) for item in candidates)
+    command = f"""
+for candidate in {quoted}; do
+    if [ -r "$candidate" ]; then
+        cat "$candidate"
+        exit 0
+    fi
+done
+exit 44
+""".strip()
+    result = await run_target_command(command, timeout=20)
+    if result.returncode != 0:
+        return set()
+    return parse_successfully_downloaded_app_ids(result.stdout)
+
+
+async def reconcile_provider_downloaded_state() -> int:
+    try:
+        app_ids = await read_provider_downloaded_app_ids()
+    except (OSError, subprocess.TimeoutExpired):
+        return 0
+    if not app_ids:
+        return 0
+    changed = library_store.mark_provider_verified(app_ids, utc_now())
+    if changed:
+        state_database.append_event(
+            "provider.state_imported",
+            provider=provider.provider_id,
+            payload={"verified_apps": changed},
+        )
+    return changed
+
 
 def selected_apps_from_ids(app_ids: list[int]) -> list[GameRecord]:
     existing = {
@@ -1225,6 +1265,7 @@ async def refresh_selected_library() -> tuple[list[GameRecord], str]:
     # Avoid launching a second SteamPrefill process while a real prefill is active.
     if app_ids:
         games = selected_apps_from_ids(app_ids)
+        await reconcile_provider_downloaded_state()
         start_metadata_refresh()
         try:
             running = (await get_raw_prefill_status()).running
@@ -1253,6 +1294,7 @@ async def refresh_selected_library() -> tuple[list[GameRecord], str]:
         selected = parse_selected_apps_status(status_result.stdout) if status_result.returncode == 0 else []
         if selected:
             games = library_store.replace_selected(selected, utc_now())
+            await reconcile_provider_downloaded_state()
             start_metadata_refresh()
             return games, f"Loaded {len(games)} selected Steam apps with transfer sizes."
         combined = "\n".join(part for part in (status_result.stdout, status_result.stderr) if part)
@@ -1268,6 +1310,7 @@ async def refresh_selected_library() -> tuple[list[GameRecord], str]:
 
     if app_ids:
         games = selected_apps_from_ids(app_ids)
+        await reconcile_provider_downloaded_state()
         start_metadata_refresh()
         detail = (
             f"Loaded {len(games)} selected apps directly from SteamPrefill's saved config. "
@@ -1322,61 +1365,181 @@ async def read_current_prefill_output(lines: int = 2500) -> str:
     return ""
 
 
-async def metadata_refresh_worker() -> None:
-    if library_store.metadata_refreshing:
-        return
-    library_store.metadata_refreshing = True
-    semaphore = asyncio.Semaphore(6)
+async def metadata_refresh_worker(*, force: bool = False) -> None:
+    async with metadata_refresh_lock:
+        if library_store.metadata_refreshing:
+            return
+        library_store.metadata_refreshing = True
+        semaphore = asyncio.Semaphore(4)
+        now = datetime.now(timezone.utc)
 
-    async def refresh_game(game: GameRecord) -> None:
-        async with semaphore:
-            if game.app_id is not None:
-                needs_name = is_placeholder_game_name(game.name, game.app_id)
-                if needs_name:
-                    result = await asyncio.to_thread(resolve_steam_metadata_by_id, game.app_id)
-                    if result is not None:
-                        name, image_url, store_url = result
+        def retry_is_due(game: GameRecord) -> bool:
+            if force or not game.metadata_retry_at:
+                return True
+            try:
+                return datetime.fromisoformat(game.metadata_retry_at) <= now
+            except ValueError:
+                return True
+
+        def needs_metadata(game: GameRecord) -> bool:
+            return (
+                game.app_id is None
+                or is_placeholder_game_name(game.name, game.app_id)
+                or not game.image_url
+                or not game.store_url
+            )
+
+        async def refresh_game(game: GameRecord) -> bool:
+            if not needs_metadata(game) or not retry_is_due(game):
+                return False
+            async with semaphore:
+                result = None
+                if game.app_id is not None:
+                    if is_placeholder_game_name(game.name, game.app_id):
+                        result = await asyncio.to_thread(resolve_steam_metadata_by_id, game.app_id)
+                    elif not game.image_url or not game.store_url:
                         library_store.save_metadata(
                             game.key,
                             game.app_id,
+                            game.image_url or f"https://cdn.cloudflare.steamstatic.com/steam/apps/{game.app_id}/header.jpg",
+                            game.store_url or f"https://store.steampowered.com/app/{game.app_id}/",
+                            name=game.name,
+                        )
+                        return True
+                else:
+                    resolved = await asyncio.to_thread(resolve_steam_metadata, game.name)
+                    if resolved is not None:
+                        app_id, image_url, store_url = resolved
+                        result = (game.name, image_url, store_url, app_id)
+
+                if result is not None:
+                    if len(result) == 4:
+                        name, image_url, store_url, app_id = result
+                    else:
+                        name, image_url, store_url = result
+                        app_id = game.app_id
+                    if app_id is not None:
+                        library_store.save_metadata(
+                            game.key,
+                            app_id,
                             image_url,
                             store_url,
                             name=name,
                         )
-                        return
-                if not game.image_url or not game.store_url:
-                    library_store.save_metadata(
-                        game.key,
-                        game.app_id,
-                        f"https://cdn.cloudflare.steamstatic.com/steam/apps/{game.app_id}/header.jpg",
-                        f"https://store.steampowered.com/app/{game.app_id}/",
-                    )
-                return
+                        return True
 
-            result = await asyncio.to_thread(resolve_steam_metadata, game.name)
-            if result is None:
-                return
-            app_id, image_url, store_url = result
-            library_store.save_metadata(game.key, app_id, image_url, store_url)
+                attempts = game.metadata_attempts + 1
+                retry_seconds = min(
+                    METADATA_RETRY_MAX_SECONDS,
+                    METADATA_RETRY_BASE_SECONDS * (2 ** min(attempts - 1, 8)),
+                )
+                library_store.update_game(
+                    game.key,
+                    metadata_attempts=attempts,
+                    metadata_retry_at=(now + timedelta(seconds=retry_seconds)).isoformat(timespec="seconds"),
+                    metadata_error="Steam metadata lookup failed; CacheDeck will retry with backoff.",
+                )
+                return False
 
-    completed = False
-    try:
-        await asyncio.gather(*(refresh_game(game) for game in library_store.list_games()))
-        completed = True
-    finally:
-        library_store.metadata_refreshing = False
-    if completed:
+        resolved_any = False
         try:
-            await sync_library_activity(deep_scan=True)
-        except Exception:
-            pass
+            results = await asyncio.gather(
+                *(refresh_game(game) for game in library_store.list_games())
+            )
+            resolved_any = any(results)
+        finally:
+            library_store.metadata_refreshing = False
+
+        if resolved_any:
+            with contextlib.suppress(Exception):
+                await sync_library_activity(deep_scan=True)
 
 
-def start_metadata_refresh() -> None:
+def start_metadata_refresh(*, force: bool = False) -> bool:
     global metadata_refresh_task
     if metadata_refresh_task is not None and not metadata_refresh_task.done():
-        return
-    metadata_refresh_task = asyncio.create_task(metadata_refresh_worker())
+        return False
+    now = datetime.now(timezone.utc)
+    due = False
+    for game in library_store.list_games():
+        unresolved = (
+            game.app_id is None
+            or is_placeholder_game_name(game.name, game.app_id)
+            or not game.image_url
+            or not game.store_url
+        )
+        if not unresolved:
+            continue
+        if force or not game.metadata_retry_at:
+            due = True
+            break
+        try:
+            if datetime.fromisoformat(game.metadata_retry_at) <= now:
+                due = True
+                break
+        except ValueError:
+            due = True
+            break
+    if not due:
+        return False
+    metadata_refresh_task = asyncio.create_task(metadata_refresh_worker(force=force))
+    return True
+
+
+def _activity_identity(status: PrefillStatus) -> str:
+    return f"{status.source}:{status.job_id or status.started_at or 'current'}"
+
+
+async def read_incremental_activity(status: PrefillStatus, *, deep_scan: bool = False) -> tuple[str, str | None]:
+    """Return unseen activity text and the previous active app name.
+
+    The cursor is persisted in SQLite so a CacheDeck restart does not replay an
+    entire long prefill log. A one-line overlap handles Spectre's carriage-return
+    progress redraws without reprocessing the whole file.
+    """
+    output = await read_current_prefill_output(50000 if deep_scan else 5000)
+    cleaned = clean_terminal_output(output)
+    lines = cleaned.splitlines()
+    identity = _activity_identity(status)
+    previous_identity = state_database.get_meta("activity.cursor.identity")
+    previous_count = parse_int(state_database.get_meta("activity.cursor.line_count")) or 0
+    active_app = state_database.get_meta("activity.cursor.active_app")
+    try:
+        previous_context = json.loads(state_database.get_meta("activity.cursor.context") or "[]")
+    except json.JSONDecodeError:
+        previous_context = []
+    if not isinstance(previous_context, list):
+        previous_context = []
+    previous_context = [str(line) for line in previous_context[-20:]]
+
+    if deep_scan or previous_identity != identity or len(lines) < previous_count:
+        delta_lines = lines
+    else:
+        delta_start: int | None = None
+        # Match the longest suffix of the previous context in the current tail.
+        # This remains reliable when ``docker logs --tail`` is already full and
+        # therefore has the same line count while older lines fall off the front.
+        for width in range(min(len(previous_context), len(lines)), 0, -1):
+            suffix = previous_context[-width:]
+            for index in range(len(lines) - width, -1, -1):
+                if lines[index:index + width] == suffix:
+                    delta_start = index + width
+                    break
+            if delta_start is not None:
+                break
+        if delta_start is not None:
+            delta_lines = lines[delta_start:]
+        elif len(lines) > previous_count:
+            delta_lines = lines[max(0, previous_count - 1):]
+        else:
+            # No overlap normally means a rotation or a Spectre redraw. Re-read
+            # a small tail instead of silently missing progress/completion lines.
+            delta_lines = lines[-25:]
+
+    state_database.set_meta("activity.cursor.identity", identity)
+    state_database.set_meta("activity.cursor.line_count", str(len(lines)))
+    state_database.set_meta("activity.cursor.context", json.dumps(lines[-20:]))
+    return "\n".join(delta_lines), active_app
 
 
 async def sync_library_activity(*, deep_scan: bool = False) -> None:
@@ -1384,10 +1547,26 @@ async def sync_library_activity(*, deep_scan: bool = False) -> None:
     latest = history_store.latest()
     if status.running:
         try:
-            output = await read_current_prefill_output(50000 if deep_scan else 2500)
-            snapshot = parse_progress_snapshot(output)
-            full_run = not latest or latest.job_id != status.job_id or latest.scope == "full"
-            library_store.apply_progress(snapshot, full_run=full_run, job_id=status.job_id)
+            output, active_app = await read_incremental_activity(status, deep_scan=deep_scan)
+            if output.strip():
+                snapshot = parse_progress_snapshot(output, initial_app_name=active_app)
+                full_run = not latest or latest.job_id != status.job_id or latest.scope == "full"
+                library_store.apply_progress(snapshot, full_run=full_run, job_id=status.job_id)
+                if snapshot.app_name:
+                    state_database.set_meta("activity.cursor.active_app", snapshot.app_name)
+                for name in snapshot.completed_for:
+                    event_key = "activity.completed." + uuid.uuid5(
+                        uuid.NAMESPACE_URL,
+                        f"{status.job_id or status.started_at}:{name.casefold()}",
+                    ).hex
+                    if state_database.get_meta(event_key) != "1":
+                        state_database.append_event(
+                            "provider.game_completed",
+                            provider=provider.provider_id,
+                            job_id=status.job_id,
+                            payload={"name": name, "downloaded": snapshot.downloaded_for.get(name)},
+                        )
+                        state_database.set_meta(event_key, "1")
         except Exception:
             pass
         return
@@ -1504,7 +1683,7 @@ async def game_queue_loop() -> None:
                     library_store.update_by_app_id(
                         item.app_id,
                         status="checking",
-                        progress=0.0,
+                        progress=None,
                         downloaded=None,
                         total=None,
                         speed=None,
@@ -1535,6 +1714,16 @@ async def game_queue_loop() -> None:
         except Exception:
             pass
         await asyncio.sleep(4)
+
+
+async def metadata_retry_loop() -> None:
+    await asyncio.sleep(60)
+    while True:
+        try:
+            start_metadata_refresh()
+        except Exception:
+            pass
+        await asyncio.sleep(60)
 
 
 async def auto_recovery_loop() -> None:
@@ -1580,17 +1769,29 @@ async def lifespan(_: FastAPI):
         history_path=HISTORY_FILE,
     )
     state_database.reconcile_queue()
+    with contextlib.suppress(Exception):
+        await reconcile_provider_downloaded_state()
+    start_metadata_refresh()
     recovery_task = asyncio.create_task(auto_recovery_loop())
     queue_task = asyncio.create_task(game_queue_loop())
+    metadata_retry_task = asyncio.create_task(metadata_retry_loop())
     try:
         yield
     finally:
         recovery_task.cancel()
         queue_task.cancel()
+        metadata_retry_task.cancel()
+        if metadata_refresh_task is not None and not metadata_refresh_task.done():
+            metadata_refresh_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await recovery_task
         with contextlib.suppress(asyncio.CancelledError):
             await queue_task
+        with contextlib.suppress(asyncio.CancelledError):
+            await metadata_retry_task
+        if metadata_refresh_task is not None:
+            with contextlib.suppress(asyncio.CancelledError):
+                await metadata_refresh_task
 
 
 app = FastAPI(
@@ -1931,8 +2132,6 @@ async def library(refresh: bool = Query(default=False)) -> LibraryResponse:
     message = ""
     if refresh or not library_store.list_games():
         _, message = await refresh_selected_library()
-    else:
-        start_metadata_refresh()
     await sync_library_activity(deep_scan=refresh or bool(message))
     return build_library_response(library_store, queue_store, message=message)
 
@@ -1946,11 +2145,14 @@ async def refresh_library() -> LibraryResponse:
 
 @app.post("/api/library/metadata", response_model=LibraryResponse)
 async def refresh_library_metadata() -> LibraryResponse:
-    start_metadata_refresh()
+    started = start_metadata_refresh(force=True)
     return build_library_response(
         library_store,
         queue_store,
-        message="Steam artwork and app IDs are being resolved in the background.",
+        message=(
+            "Steam artwork and app IDs are being resolved in the background."
+            if started else "No unresolved Steam metadata is currently due for refresh."
+        ),
     )
 
 
@@ -1989,7 +2191,7 @@ def enqueue_library_games(app_ids: list[int]) -> tuple[int, list[str]]:
         library_store.update_by_app_id(
             app_id,
             status="queued" if queue_item.state == "queued" else "checking",
-            progress=0.0,
+            progress=None,
             update_available=None,
             message=(
                 "Queued for a Steam update check. Any available update will be downloaded automatically."

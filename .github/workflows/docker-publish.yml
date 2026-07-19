@@ -35,22 +35,52 @@ jobs:
           set -euo pipefail
           docker run -d --name cachedeck-smoke -p 18080:8080 cachedeck:test
           trap 'docker logs cachedeck-smoke || true; docker rm -f cachedeck-smoke || true' EXIT
-          for attempt in {1..30}; do
-            if python - <<'PY'
-          import json
-          import urllib.request
 
-          with urllib.request.urlopen("http://127.0.0.1:18080/api/engine", timeout=2) as response:
-              payload = json.load(response)
-          assert payload["schema_version"] == 1
-          assert payload["provider"]["id"] == "steamprefill"
-          PY
-            then
-              exit 0
+          health=""
+          for attempt in {1..60}; do
+            state="$(docker inspect --format '{{.State.Status}}' cachedeck-smoke)"
+            health="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' cachedeck-smoke)"
+
+            if [[ "${state}" != "running" ]]; then
+              echo "CacheDeck container stopped during startup (state=${state})." >&2
+              exit 1
+            fi
+            if [[ "${health}" == "healthy" ]]; then
+              break
+            fi
+            if [[ "${health}" == "unhealthy" ]]; then
+              echo "CacheDeck container became unhealthy during startup." >&2
+              exit 1
             fi
             sleep 1
           done
-          exit 1
+
+          if [[ "${health}" != "healthy" ]]; then
+            echo "CacheDeck did not become healthy within 60 seconds." >&2
+            exit 1
+          fi
+
+          python - <<'PY'
+          import json
+          import urllib.request
+
+          def get_json(path: str) -> dict:
+              with urllib.request.urlopen(
+                  f"http://127.0.0.1:18080{path}", timeout=5
+              ) as response:
+                  assert response.status == 200
+                  return json.load(response)
+
+          health = get_json("/api/health")
+          engine = get_json("/api/engine")
+
+          assert health["app"] == "CacheDeck"
+          assert health["provider"] == "steamprefill"
+          assert isinstance(health["schema_version"], int)
+          assert health["schema_version"] >= 1
+          assert engine["provider"]["id"] == "steamprefill"
+          assert engine["schema_version"] == health["schema_version"]
+          PY
 
   docker:
     needs: test

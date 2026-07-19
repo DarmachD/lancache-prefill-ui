@@ -6,7 +6,7 @@ provider is an existing
 CacheDeck now owns its game catalogue, queue, run history and structured event
 state instead of treating terminal output as its database.
 
-Version 0.7 is the foundation for CacheDeck's native Steam prefill engine. It
+Version 0.7.2 is the hardened compatibility foundation for CacheDeck's native Steam prefill engine. It
 keeps SteamPrefill as the working compatibility provider, so existing downloads,
 schedules and authentication continue to work while the native provider is
 built incrementally.
@@ -17,7 +17,7 @@ built incrementally.
 - Reconnectable live output using a WebSocket stream
 - Detection of jobs started by SteamPrefill's scheduler or another client
 - Pause and resume controls for active CacheDeck or scheduler-started prefills
-- Games tab with Steam artwork, selected/downloaded/queued state and progress
+- Games tab with Steam artwork, selected/downloaded/queued state and honest known/unknown progress
 - Persistent per-game update queue with one-click and bulk **Check & update**
 - Search, filters, sorting and comfortable/compact library density
 - Compressed transfer totals, estimated queue size and latest-run amounts
@@ -135,8 +135,15 @@ active prefill was not stopped. The scheduler skipped only its duplicate launch.
 CacheDeck first reads SteamPrefill's saved `selectedAppsToPrefill.json`, which
 allows selected games to appear even when Steam's manifest service is failing.
 It then attempts the heavier `select-apps status --no-ansi` scan for compressed
-transfer sizes. Names and artwork are resolved in the background and persisted
-in CacheDeck's database.
+transfer sizes. Names and artwork are resolved in the background with exponential
+retry backoff and persisted in CacheDeck's database. Normal Games-view polling no
+longer restarts that metadata work.
+
+CacheDeck tracks SteamPrefill output incrementally and persists the log cursor and
+active game name in SQLite. This allows a completion line to remain attributable
+after log rotation or after the original `Starting ...` line has fallen out of the
+visible tail. Where SteamPrefill does not report a trustworthy percentage, the UI
+shows **Progress unknown** instead of a misleading 0%.
 
 A per-game **Check & update** action adds the Steam app to CacheDeck's queue. When
 the provider is free, CacheDeck runs a targeted prefill. SteamPrefill does not
@@ -203,7 +210,7 @@ templates/cachedeck.xml
 Before public submission:
 
 1. Push the repository to GitHub.
-2. Tag the release, for example `v0.7.0`.
+2. Tag the release, for example `v0.7.2`.
 3. Confirm the test and Docker-build jobs succeed.
 4. Make the `ghcr.io/darmachd/cachedeck` package public.
 5. Test a clean install and an upgrade from v0.6.2.
