@@ -322,6 +322,30 @@
     .view-panel { display: none; }
     .view-panel.active { display: block; }
 
+    .schedule-list { display: grid; gap: 9px; margin-top: 12px; }
+    .schedule-row { border: 1px solid var(--border-soft); border-radius: 11px; padding: 10px; background: #101827; }
+    .schedule-row.disabled { opacity: .68; }
+    .schedule-row-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+    .schedule-row h3 { margin: 0; font-size: .95rem; }
+    .schedule-row code { display: block; margin-top: 4px; color: #cbd8ea; overflow-wrap: anywhere; }
+    .schedule-meta { display: grid; gap: 3px; margin-top: 8px; color: var(--muted); font-size: .76rem; line-height: 1.35; }
+    .schedule-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
+    .schedule-actions button { min-height: 32px; padding: 6px 9px; font-size: .76rem; }
+    .schedule-empty { border: 1px dashed var(--border); border-radius: 11px; padding: 14px; color: var(--muted); text-align: center; }
+    .target-schedule { margin-top: 12px; border-top: 1px solid var(--border-soft); padding-top: 10px; }
+    .target-schedule summary { color: var(--muted); cursor: pointer; font-weight: 700; }
+    .schedule-dialog { width: min(520px, calc(100vw - 28px)); border: 1px solid var(--border); border-radius: 14px; padding: 0; background: #111827; color: var(--text); }
+    .schedule-dialog::backdrop { background: rgba(0, 0, 0, .72); }
+    .schedule-dialog-body { padding: 18px; }
+    .schedule-dialog h2 { margin: 0 0 14px; }
+    .schedule-form-grid { display: grid; gap: 12px; }
+    .schedule-form-grid label { display: grid; gap: 6px; color: var(--muted); font-size: .82rem; font-weight: 700; }
+    .schedule-form-grid input[type="text"] { width: 100%; min-height: 42px; border: 1px solid #354761; border-radius: 10px; padding: 9px 11px; background: #0d1523; color: var(--text); }
+    .schedule-enabled { display: flex !important; grid-template-columns: auto 1fr; align-items: center; gap: 8px !important; color: var(--text) !important; }
+    .schedule-enabled input { width: 18px; height: 18px; accent-color: var(--accent); }
+    .schedule-help { margin: 0; color: var(--muted); font-size: .76rem; line-height: 1.4; }
+    .schedule-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+
     .library-control-card {
       position: sticky;
       z-index: 20;
@@ -645,20 +669,32 @@
           <div class="stat"><dt>Schema</dt><dd id="engine-schema">—</dd></div>
           <div class="stat"><dt>Structured events</dt><dd id="engine-events">—</dd></div>
           <div class="stat"><dt>Depot / manifest records</dt><dd id="engine-catalogue">—</dd></div>
+          <div class="stat"><dt>Managed schedules</dt><dd id="engine-schedules">—</dd></div>
           <div class="stat"><dt>v0.6 state import</dt><dd id="engine-migration">—</dd></div>
         </dl>
         <div class="button-row"><button id="backup-database" type="button">Backup database</button><button id="repair-engine" type="button">Repair state</button></div>
       </div>
 
       <div class="card">
-        <div class="card-heading"><h2>Schedule</h2><button id="refresh-schedule" class="ghost" type="button">Refresh</button></div>
-        <dl class="stats">
-          <div class="stat"><dt>Cron</dt><dd id="schedule-expression">—</dd></div>
-          <div class="stat"><dt>Timezone</dt><dd id="schedule-timezone">—</dd></div>
-          <div class="stat"><dt>Next expected run</dt><dd id="schedule-next">—</dd></div>
-          <div class="stat"><dt>Last detected scheduled/external run</dt><dd id="schedule-last">—</dd></div>
-        </dl>
-        <p id="schedule-message" class="muted" style="margin:12px 0 0"></p>
+        <div class="card-heading">
+          <h2>Schedules</h2>
+          <div class="button-row">
+            <button id="add-schedule" class="primary" type="button">Add</button>
+            <button id="refresh-schedule" class="ghost" type="button">Refresh</button>
+          </div>
+        </div>
+        <p id="schedule-message" class="muted" style="margin:0"></p>
+        <div id="schedule-list" class="schedule-list"><div class="schedule-empty">Loading schedules…</div></div>
+        <details class="target-schedule">
+          <summary>Detected target-container schedule</summary>
+          <dl class="stats" style="margin-top:8px">
+            <div class="stat"><dt>Cron</dt><dd id="schedule-expression">—</dd></div>
+            <div class="stat"><dt>Timezone</dt><dd id="schedule-timezone">—</dd></div>
+            <div class="stat"><dt>Next expected run</dt><dd id="schedule-next">—</dd></div>
+            <div class="stat"><dt>Last external run</dt><dd id="schedule-last">—</dd></div>
+          </dl>
+          <p id="target-schedule-message" class="muted" style="margin:10px 0 0"></p>
+        </details>
       </div>
 
       <div class="card">
@@ -767,8 +803,9 @@
         <button id="library-retry-failed" type="button">Retry failed</button>
         <button id="library-scan-history" type="button">Scan historical logs</button>
         <button id="library-verify-unverified" type="button">Verify unverified</button>
+        <button id="library-select-all" type="button">Select all</button>
         <button id="library-select-visible" type="button">Select visible</button>
-        <button id="library-clear-selection" type="button">Clear selection</button>
+        <button id="library-deselect-all" type="button">Deselect all</button>
       </div>
       <div class="library-bulk-bar">
         <div id="library-selection-summary" class="library-selection-summary"><strong>0 selected</strong> · estimated transfer 0 B</div>
@@ -781,6 +818,30 @@
     </div>
   </section>
 </main>
+<dialog id="schedule-dialog" class="schedule-dialog">
+  <div class="schedule-dialog-body">
+    <h2 id="schedule-dialog-title">Add schedule</h2>
+    <input id="schedule-id" type="hidden">
+    <div class="schedule-form-grid">
+      <label>Name
+        <input id="schedule-name" type="text" maxlength="80" placeholder="Nightly prefill">
+      </label>
+      <label>Cron expression
+        <input id="schedule-cron" type="text" maxlength="120" placeholder="0 2 * * *">
+      </label>
+      <p class="schedule-help">Five fields: minute, hour, day of month, month and weekday. Example: <code>0 2 * * *</code> runs every day at 02:00.</p>
+      <label>Timezone
+        <input id="schedule-tz" type="text" maxlength="80" placeholder="Europe/London">
+      </label>
+      <label class="schedule-enabled"><input id="schedule-enabled" type="checkbox" checked> Enabled</label>
+    </div>
+    <p id="schedule-form-error" class="muted" style="margin:12px 0 0"></p>
+    <div class="schedule-dialog-actions">
+      <button id="cancel-schedule" type="button">Cancel</button>
+      <button id="save-schedule" class="primary" type="button">Save schedule</button>
+    </div>
+  </div>
+</dialog>
 <div id="toast" class="toast" hidden role="status"></div>
 
 <script src="/static/vendor/xterm.js"></script>
@@ -824,6 +885,7 @@
   let libraryRequestRunning = false;
   let libraryMetadataPoll = null;
   let libraryUpdatesOnly = false;
+  let scheduleData = null;
   const selectedGameIds = new Set();
   const logDecoder = new TextDecoder();
 
@@ -1089,6 +1151,7 @@
       $("engine-schema").textContent = `v${data.schema_version}`;
       $("engine-events").textContent = formatNumber(data.counts && data.counts.events || 0);
       $("engine-catalogue").textContent = `${formatNumber(data.counts && data.counts.depots || 0)} / ${formatNumber(data.counts && data.counts.manifests || 0)}`;
+      $("engine-schedules").textContent = formatNumber(data.counts && data.counts.schedules || 0);
       const migration = data.legacy_migration || {};
       const imported = migration.counts || {};
       $("engine-migration").textContent = migration.errors && migration.errors.length
@@ -1232,18 +1295,123 @@
     }
   }
 
+  function renderSchedules() {
+    const list = $("schedule-list");
+    list.innerHTML = "";
+    const schedules = scheduleData && Array.isArray(scheduleData.schedules) ? scheduleData.schedules : [];
+    if (!schedules.length) {
+      list.innerHTML = '<div class="schedule-empty">No CacheDeck schedules yet.</div>';
+    } else {
+      for (const schedule of schedules) {
+        const row = document.createElement("div");
+        row.className = `schedule-row${schedule.enabled ? "" : " disabled"}`;
+        row.innerHTML = `
+          <div class="schedule-row-head">
+            <div><h3>${escapeHtml(schedule.name)}</h3><code>${escapeHtml(schedule.expression)}</code></div>
+            <span class="job-state ${schedule.enabled ? "completed" : "stopped"}">${schedule.enabled ? "Enabled" : "Disabled"}</span>
+          </div>
+          <div class="schedule-meta">
+            <span>${escapeHtml(schedule.timezone)} · next ${escapeHtml(formatTime(schedule.next_run))}</span>
+            <span>Last run: ${escapeHtml(formatTime(schedule.last_run_at))}${schedule.last_result ? ` · ${escapeHtml(schedule.last_result)}` : ""}</span>
+          </div>
+          <div class="schedule-actions">
+            <button type="button" data-edit-schedule="${escapeHtml(schedule.schedule_id)}">Edit</button>
+            <button type="button" data-run-schedule="${escapeHtml(schedule.schedule_id)}">Run now</button>
+            <button type="button" class="danger" data-delete-schedule="${escapeHtml(schedule.schedule_id)}">Remove</button>
+          </div>`;
+        list.appendChild(row);
+      }
+    }
+    const target = scheduleData && scheduleData.detected_target_schedule || {};
+    $("schedule-expression").textContent = target.expression || "Not detected";
+    $("schedule-timezone").textContent = target.timezone || "UTC";
+    $("schedule-next").textContent = formatTime(target.next_run);
+    $("schedule-last").textContent = formatTime(target.last_external_run);
+    $("target-schedule-message").textContent = target.message || "";
+    $("schedule-message").textContent = scheduleData && scheduleData.message || "";
+  }
+
   async function updateSchedule() {
     try {
-      const response = await fetch("/api/schedule", { cache: "no-store" });
+      const response = await fetch("/api/schedules", { cache: "no-store" });
       const data = await response.json();
-      $("schedule-expression").textContent = data.expression || "Not detected";
-      $("schedule-timezone").textContent = data.timezone || "UTC";
-      $("schedule-next").textContent = formatTime(data.next_run);
-      $("schedule-last").textContent = formatTime(data.last_external_run);
-      $("schedule-message").textContent = data.message || "";
+      if (!response.ok) throw new Error(data.detail || "Unable to load schedules.");
+      scheduleData = data;
+      renderSchedules();
     } catch (error) {
-      $("schedule-message").textContent = `Unable to read schedule: ${error.message}`;
+      $("schedule-message").textContent = `Unable to read schedules: ${error.message}`;
     }
+  }
+
+  function openScheduleDialog(schedule = null) {
+    $("schedule-dialog-title").textContent = schedule ? "Edit schedule" : "Add schedule";
+    $("schedule-id").value = schedule ? schedule.schedule_id : "";
+    $("schedule-name").value = schedule ? schedule.name : "Nightly prefill";
+    $("schedule-cron").value = schedule ? schedule.expression : "0 2 * * *";
+    const browserTimezone = (() => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"; } catch (_) { return "UTC"; } })();
+    const detectedTimezone = scheduleData && scheduleData.detected_target_schedule && scheduleData.detected_target_schedule.timezone;
+    $("schedule-tz").value = schedule ? schedule.timezone : (detectedTimezone || browserTimezone);
+    $("schedule-enabled").checked = schedule ? Boolean(schedule.enabled) : true;
+    $("schedule-form-error").textContent = "";
+    $("schedule-dialog").showModal();
+  }
+
+  async function saveSchedule() {
+    const scheduleId = $("schedule-id").value;
+    const payload = {
+      name: $("schedule-name").value.trim(),
+      expression: $("schedule-cron").value.trim(),
+      timezone: $("schedule-tz").value.trim(),
+      enabled: $("schedule-enabled").checked
+    };
+    if (!payload.name || !payload.expression || !payload.timezone) {
+      $("schedule-form-error").textContent = "Name, cron expression and timezone are required.";
+      return;
+    }
+    const button = $("save-schedule");
+    button.disabled = true;
+    try {
+      const response = await fetch(scheduleId ? `/api/schedules/${encodeURIComponent(scheduleId)}` : "/api/schedules", {
+        method: scheduleId ? "PUT" : "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || "Unable to save schedule.");
+      scheduleData = data;
+      $("schedule-dialog").close();
+      renderSchedules();
+      showToast(scheduleId ? "Schedule updated." : "Schedule created.");
+    } catch (error) {
+      $("schedule-form-error").textContent = error.message;
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  async function deleteSchedule(scheduleId) {
+    const schedule = scheduleData && scheduleData.schedules.find((item) => item.schedule_id === scheduleId);
+    if (!window.confirm(`Remove ${schedule ? schedule.name : "this schedule"}?`)) return;
+    try {
+      const response = await fetch(`/api/schedules/${encodeURIComponent(scheduleId)}`, { method: "DELETE" });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || "Unable to remove schedule.");
+      scheduleData = data;
+      renderSchedules();
+      showToast("Schedule removed.");
+    } catch (error) { showToast(error.message, true); }
+  }
+
+  async function runScheduleNow(scheduleId) {
+    try {
+      const response = await fetch(`/api/schedules/${encodeURIComponent(scheduleId)}/run`, { method: "POST" });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || "Unable to run schedule.");
+      scheduleData = data;
+      renderSchedules();
+      showToast("Scheduled prefill started.");
+      updatePrefill();
+    } catch (error) { showToast(error.message, true); }
   }
 
   async function updateHistory() {
@@ -1757,6 +1925,15 @@
     queueBulkGames(ids, "unverified games");
   }
 
+  function selectAllGames() {
+    for (const game of (libraryData && libraryData.games || [])) {
+      const queueItem = libraryQueueForGame(game);
+      const active = ["downloading", "checking"].includes(game.status) || Boolean(queueItem);
+      if (game.app_id && !active) selectedGameIds.add(String(game.app_id));
+    }
+    renderLibrary();
+  }
+
   function selectVisibleGames() {
     for (const game of getVisibleLibraryGames()) {
       const queueItem = libraryQueueForGame(game);
@@ -1861,8 +2038,9 @@
     const failedIds = (libraryData && libraryData.games || []).filter((game) => game.status === "failed" && game.app_id).map((game) => game.app_id);
     queueBulkGames(failedIds, "failed games");
   });
+  $("library-select-all").addEventListener("click", selectAllGames);
   $("library-select-visible").addEventListener("click", selectVisibleGames);
-  $("library-clear-selection").addEventListener("click", () => { selectedGameIds.clear(); renderLibrary(); });
+  $("library-deselect-all").addEventListener("click", () => { selectedGameIds.clear(); renderLibrary(); });
   $("library-queue-selected").addEventListener("click", () => queueBulkGames([...selectedGameIds], "selected games"));
   $("library-list").addEventListener("change", (event) => {
     const checkbox = event.target.closest("input[data-select-app]");
@@ -1926,6 +2104,19 @@
     $("expand-prefill-log").textContent = expanded ? "Exit full screen" : "Full screen";
   });
   $("reconnect-prefill-log").addEventListener("click", () => connectPrefillLog(prefillLogSource, true));
+  $("add-schedule").addEventListener("click", () => openScheduleDialog());
+  $("cancel-schedule").addEventListener("click", () => $("schedule-dialog").close());
+  $("save-schedule").addEventListener("click", saveSchedule);
+  $("schedule-list").addEventListener("click", (event) => {
+    const button = event.target.closest("button");
+    if (!button) return;
+    if (button.dataset.editSchedule) {
+      const schedule = scheduleData && scheduleData.schedules.find((item) => item.schedule_id === button.dataset.editSchedule);
+      if (schedule) openScheduleDialog(schedule);
+    }
+    if (button.dataset.runSchedule) runScheduleNow(button.dataset.runSchedule);
+    if (button.dataset.deleteSchedule) deleteSchedule(button.dataset.deleteSchedule);
+  });
   $("refresh-schedule").addEventListener("click", updateSchedule);
   $("run-diagnostics").addEventListener("click", runDiagnostics);
   $("copy-diagnostics").addEventListener("click", () => copyText(diagnosticsText, "Diagnostics copied."));

@@ -1,6 +1,10 @@
 import unittest
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
-from app.main import managed_prefill_command
+from fastapi import HTTPException
+
+from app.main import cron_matches, managed_prefill_command, validate_schedule_values
 
 
 class MainHelperTests(unittest.TestCase):
@@ -14,6 +18,22 @@ class MainHelperTests(unittest.TestCase):
         command = managed_prefill_command()
         self.assertEqual(command.split().count("--verbose"), 1)
         self.assertEqual(command.split().count("--no-ansi"), 1)
+
+
+class ScheduleHelperTests(unittest.TestCase):
+    def test_cron_matching_uses_schedule_timezone_datetime(self):
+        candidate = datetime(2026, 7, 20, 2, 0, tzinfo=ZoneInfo("Europe/London"))
+        self.assertTrue(cron_matches("0 2 * * *", candidate))
+        self.assertFalse(cron_matches("30 2 * * *", candidate))
+
+    def test_schedule_validation_normalises_and_rejects_bad_values(self):
+        expression, timezone_name = validate_schedule_values(" 0   2 * * * ", "Europe/London")
+        self.assertEqual(expression, "0 2 * * *")
+        self.assertEqual(timezone_name, "Europe/London")
+        with self.assertRaises(HTTPException):
+            validate_schedule_values("not cron", "Europe/London")
+        with self.assertRaises(HTTPException):
+            validate_schedule_values("0 2 * * *", "Not/AZone")
 
 
 class QueueHelperTests(unittest.TestCase):

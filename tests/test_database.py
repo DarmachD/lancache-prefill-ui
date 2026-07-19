@@ -239,5 +239,40 @@ class DatabaseHardeningTests(unittest.TestCase):
             self.assertEqual(events[0]["event_type"], "game.progress")
 
 
+class ScheduleDatabaseTests(unittest.TestCase):
+    def test_schedule_crud_and_runtime_state_are_persistent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "cachedeck.db"
+            database = StateDatabase(path)
+            created = database.upsert_schedule(
+                schedule_id="nightly",
+                name="Nightly prefill",
+                expression="0 2 * * *",
+                timezone_name="Europe/London",
+                enabled=True,
+            )
+            self.assertEqual(created["name"], "Nightly prefill")
+            self.assertTrue(created["enabled"])
+
+            database.update_schedule_runtime(
+                "nightly",
+                last_trigger_key="2026-07-20T02:00+01:00",
+                last_run_at="2026-07-20T01:00:00+00:00",
+                last_result="Started prefill job job-1.",
+            )
+            reopened = StateDatabase(path)
+            schedule = reopened.get_schedule("nightly")
+            self.assertIsNotNone(schedule)
+            self.assertEqual(schedule["last_result"], "Started prefill job job-1.")
+            self.assertEqual(reopened.counts()["schedules"], 1)
+
+            removed = reopened.delete_schedule("nightly")
+            self.assertEqual(removed["schedule_id"], "nightly")
+            self.assertEqual(reopened.list_schedules(), [])
+            event_types = {event["event_type"] for event in reopened.list_events()}
+            self.assertIn("schedule.created", event_types)
+            self.assertIn("schedule.deleted", event_types)
+
+
 if __name__ == "__main__":
     unittest.main()

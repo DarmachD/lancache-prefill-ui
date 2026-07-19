@@ -6,7 +6,7 @@ provider is an existing
 CacheDeck now owns its game catalogue, queue, run history and structured event
 state instead of treating terminal output as its database.
 
-Version 0.7.3 is the hardened compatibility foundation for CacheDeck's native Steam prefill engine. It
+Version 0.7.4 is the hardened compatibility foundation for CacheDeck's native Steam prefill engine. It
 keeps SteamPrefill as the working compatibility provider, so existing downloads,
 schedules and authentication continue to work while the native provider is
 built incrementally.
@@ -27,7 +27,7 @@ built incrementally.
 - Automatic one-time import from v0.6 JSON state without deleting the originals
 - Provider capability reporting so unsupported features are not faked in the UI
 - Persistent run history and optional one-shot restart recovery
-- Schedule, timezone and next-run visibility
+- CacheDeck-managed schedule creation, editing, enabling/disabling, removal and run-now controls
 - Environment, provider and SQLite diagnostics
 - Lazy-loaded interactive SteamPrefill console
 - Copy, download, clear-view and full-screen logs
@@ -159,9 +159,17 @@ LANCache stores shared CDN objects, not isolated installed-game folders. A safe
 per-game uninstall is therefore not available. **Forget CacheDeck status** only
 resets CacheDeck's record and does not delete cache data.
 
-## Schedule detection
+## Schedules
 
-The SteamPrefill compatibility provider recognises:
+CacheDeck can own multiple persistent five-field cron schedules from the
+Dashboard. Each schedule has a name, timezone and enabled state, and can be
+created, edited, removed or started immediately. Schedule state is stored in
+`/config/cachedeck.db`, and jobs are launched server-side without requiring an
+open browser. If a scheduled run occurs while another prefill is active, that
+occurrence is recorded as skipped rather than starting a duplicate.
+
+The SteamPrefill compatibility provider also detects schedules configured on the
+target container through these environment variables:
 
 - `GlobalSchedule`
 - `GLOBAL_SCHEDULE`
@@ -169,8 +177,11 @@ The SteamPrefill compatibility provider recognises:
 - `STEAMPREFILL_SCHEDULE`
 - `SCHEDULE`
 
-Standard five-field cron expressions are displayed with the next expected run.
-The target container's `TZ` value is used when present.
+A detected target-container schedule remains read-only because Docker cannot
+change a running container's environment safely. Disable `GLOBAL_SCHEDULE` in
+the Unraid template when CacheDeck-managed schedules should be the only source
+of automatic runs. Both schedule types show their timezone and next expected
+run in the Dashboard.
 
 ## Diagnostics
 
@@ -210,7 +221,7 @@ templates/cachedeck.xml
 Before public submission:
 
 1. Push the repository to GitHub.
-2. Tag the release, for example `v0.7.3`.
+2. Tag the release, for example `v0.7.4`.
 3. Confirm the test and Docker-build jobs succeed.
 4. Make the `ghcr.io/darmachd/cachedeck` package public.
 5. Test a clean install and an upgrade from v0.6.2.

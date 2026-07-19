@@ -183,6 +183,32 @@ class ScheduleInfo(BaseModel):
     message: str = ""
 
 
+class ManagedScheduleRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    expression: str = Field(min_length=1, max_length=120)
+    timezone: str = Field(default="UTC", min_length=1, max_length=80)
+    enabled: bool = True
+
+
+class ManagedScheduleInfo(BaseModel):
+    schedule_id: str
+    name: str
+    expression: str
+    timezone: str
+    enabled: bool
+    next_run: str | None = None
+    last_run_at: str | None = None
+    last_result: str | None = None
+    created_at: str
+    updated_at: str
+
+
+class ManagedScheduleList(BaseModel):
+    schedules: list[ManagedScheduleInfo]
+    detected_target_schedule: ScheduleInfo
+    message: str = ""
+
+
 class DiagnosticCheck(BaseModel):
     name: str
     ok: bool
@@ -1006,6 +1032,95 @@ def next_cron_run(expression: str, tz_name: str) -> str | None:
     return None
 
 
+def cron_matches(expression: str, candidate: datetime) -> bool:
+    fields = expression.split()
+    if len(fields) != 5:
+        return False
+    minute = parse_cron_field(fields[0], 0, 59)
+    hour = parse_cron_field(fields[1], 0, 23)
+    day = parse_cron_field(fields[2], 1, 31)
+    month = parse_cron_field(fields[3], 1, 12)
+    weekday = parse_cron_field(fields[4], 0, 7)
+    if any(value is None for value in (minute, hour, day, month, weekday)):
+        return False
+    assert minute is not None and hour is not None and day is not None
+    assert month is not None and weekday is not None
+    normalized_weekday = {0 if value == 7 else value for value in weekday}
+    cron_weekday = (candidate.weekday() + 1) % 7
+    day_matches = candidate.day in day
+    weekday_matches = cron_weekday in normalized_weekday
+    if fields[2] == "*" and fields[4] == "*":
+        calendar_matches = True
+    elif fields[2] == "*":
+        calendar_matches = weekday_matches
+    elif fields[4] == "*":
+        calendar_matches = day_matches
+    else:
+        calendar_matches = day_matches or weekday_matches
+    return (
+        candidate.minute in minute
+        and candidate.hour in hour
+        and candidate.month in month
+        and calendar_matches
+    )
+
+
+def validate_schedule_values(expression: str, timezone_name: str) -> tuple[str, str]:
+    expression = " ".join(expression.strip().split())
+    timezone_name = timezone_name.strip() or "UTC"
+    fields = expression.split()
+    if len(fields) != 5 or any(
+        parse_cron_field(field, minimum, maximum) is None
+        for field, minimum, maximum in zip(
+            fields, (0, 0, 1, 1, 0), (59, 23, 31, 12, 7), strict=True
+        )
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="Use a valid five-field cron expression: minute hour day month weekday.",
+        )
+    try:
+        ZoneInfo(timezone_name)
+    except ZoneInfoNotFoundError as exc:
+        raise HTTPException(status_code=422, detail=f"Unknown timezone: {timezone_name}") from exc
+    return expression, timezone_name
+
+
+def managed_schedule_model(raw: dict[str, Any]) -> ManagedScheduleInfo:
+    return ManagedScheduleInfo(
+        schedule_id=str(raw["schedule_id"]),
+        name=str(raw["name"]),
+        expression=str(raw["expression"]),
+        timezone=str(raw["timezone"]),
+        enabled=bool(raw["enabled"]),
+        next_run=(
+            next_cron_run(str(raw["expression"]), str(raw["timezone"]))
+            if raw.get("enabled")
+            else None
+        ),
+        last_run_at=raw.get("last_run_at"),
+        last_result=raw.get("last_result"),
+        created_at=str(raw["created_at"]),
+        updated_at=str(raw["updated_at"]),
+    )
+
+
+async def managed_schedule_list() -> ManagedScheduleList:
+    detected = await get_schedule_info()
+    schedules = [managed_schedule_model(item) for item in state_database.list_schedules()]
+    message = (
+        "A schedule is also enabled inside the target container. Disable its GLOBAL_SCHEDULE "
+        "setting in Unraid if you want CacheDeck to be the only scheduler."
+        if detected.configured
+        else "CacheDeck-managed schedules continue to run without an open browser."
+    )
+    return ManagedScheduleList(
+        schedules=schedules,
+        detected_target_schedule=detected,
+        message=message,
+    )
+
+
 async def get_schedule_info() -> ScheduleInfo:
     details = await inspect_target_details()
     environment = details.get("environment", {})
@@ -1718,6 +1833,82 @@ async def game_queue_loop() -> None:
         await asyncio.sleep(4)
 
 
+async def managed_schedule_loop() -> None:
+    await asyncio.sleep(3)
+    while True:
+        try:
+            now_utc = datetime.now(timezone.utc)
+            for raw in state_database.list_schedules():
+                if not raw.get("enabled"):
+                    continue
+                try:
+                    local_now = now_utc.astimezone(ZoneInfo(str(raw["timezone"]))).replace(
+                        second=0, microsecond=0
+                    )
+                except ZoneInfoNotFoundError:
+                    continue
+                if not cron_matches(str(raw["expression"]), local_now):
+                    continue
+                trigger_key = local_now.isoformat(timespec="minutes")
+                if raw.get("last_trigger_key") == trigger_key:
+                    continue
+                schedule_id = str(raw["schedule_id"])
+                run_at = utc_now()
+                state_database.update_schedule_runtime(
+                    schedule_id,
+                    last_trigger_key=trigger_key,
+                    last_run_at=run_at,
+                    last_result="Checking whether a prefill can start.",
+                )
+                raw_status = await get_raw_prefill_status()
+                if raw_status.running:
+                    result_message = "Skipped because another prefill was already running."
+                    state_database.update_schedule_runtime(
+                        schedule_id, last_result=result_message
+                    )
+                    state_database.append_event(
+                        "schedule.skipped",
+                        payload={
+                            "schedule_id": schedule_id,
+                            "name": raw["name"],
+                            "reason": "prefill_running",
+                        },
+                    )
+                    continue
+                try:
+                    result = await launch_prefill_job()
+                    result_message = f"Started prefill job {result.status.job_id or 'successfully'}."
+                    state_database.update_schedule_runtime(
+                        schedule_id, last_result=result_message
+                    )
+                    state_database.append_event(
+                        "schedule.triggered",
+                        job_id=result.status.job_id,
+                        payload={
+                            "schedule_id": schedule_id,
+                            "name": raw["name"],
+                            "expression": raw["expression"],
+                            "timezone": raw["timezone"],
+                        },
+                    )
+                except Exception as exc:
+                    result_message = f"Failed to start: {exc}"
+                    state_database.update_schedule_runtime(
+                        schedule_id, last_result=result_message
+                    )
+                    state_database.append_event(
+                        "schedule.failed",
+                        payload={
+                            "schedule_id": schedule_id,
+                            "name": raw["name"],
+                            "error": str(exc),
+                        },
+                    )
+        except Exception:
+            pass
+        await asyncio.sleep(15)
+
+
 async def metadata_retry_loop() -> None:
     await asyncio.sleep(60)
     while True:
@@ -1777,12 +1968,14 @@ async def lifespan(_: FastAPI):
     recovery_task = asyncio.create_task(auto_recovery_loop())
     queue_task = asyncio.create_task(game_queue_loop())
     metadata_retry_task = asyncio.create_task(metadata_retry_loop())
+    schedule_task = asyncio.create_task(managed_schedule_loop())
     try:
         yield
     finally:
         recovery_task.cancel()
         queue_task.cancel()
         metadata_retry_task.cancel()
+        schedule_task.cancel()
         if metadata_refresh_task is not None and not metadata_refresh_task.done():
             metadata_refresh_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
@@ -1791,6 +1984,8 @@ async def lifespan(_: FastAPI):
             await queue_task
         with contextlib.suppress(asyncio.CancelledError):
             await metadata_retry_task
+        with contextlib.suppress(asyncio.CancelledError):
+            await schedule_task
         if metadata_refresh_task is not None:
             with contextlib.suppress(asyncio.CancelledError):
                 await metadata_refresh_task
@@ -2340,7 +2535,86 @@ async def cancel_game_update(queue_id: str) -> LibraryResponse:
 
 @app.get("/api/schedule", response_model=ScheduleInfo)
 async def schedule() -> ScheduleInfo:
+    """Backward-compatible target-container schedule detection endpoint."""
     return await get_schedule_info()
+
+
+@app.get("/api/schedules", response_model=ManagedScheduleList)
+async def schedules() -> ManagedScheduleList:
+    return await managed_schedule_list()
+
+
+@app.post("/api/schedules", response_model=ManagedScheduleList)
+async def create_schedule(request: ManagedScheduleRequest) -> ManagedScheduleList:
+    expression, timezone_name = validate_schedule_values(request.expression, request.timezone)
+    name = request.name.strip()
+    if not name:
+        raise HTTPException(status_code=422, detail="Schedule name cannot be blank.")
+    schedule_id = uuid.uuid4().hex
+    state_database.upsert_schedule(
+        schedule_id=schedule_id,
+        name=name,
+        expression=expression,
+        timezone_name=timezone_name,
+        enabled=request.enabled,
+    )
+    return await managed_schedule_list()
+
+
+@app.put("/api/schedules/{schedule_id}", response_model=ManagedScheduleList)
+async def update_schedule(
+    schedule_id: str, request: ManagedScheduleRequest
+) -> ManagedScheduleList:
+    if state_database.get_schedule(schedule_id) is None:
+        raise HTTPException(status_code=404, detail="Schedule not found.")
+    expression, timezone_name = validate_schedule_values(request.expression, request.timezone)
+    name = request.name.strip()
+    if not name:
+        raise HTTPException(status_code=422, detail="Schedule name cannot be blank.")
+    state_database.upsert_schedule(
+        schedule_id=schedule_id,
+        name=name,
+        expression=expression,
+        timezone_name=timezone_name,
+        enabled=request.enabled,
+    )
+    return await managed_schedule_list()
+
+
+@app.delete("/api/schedules/{schedule_id}", response_model=ManagedScheduleList)
+async def remove_schedule(schedule_id: str) -> ManagedScheduleList:
+    if state_database.delete_schedule(schedule_id) is None:
+        raise HTTPException(status_code=404, detail="Schedule not found.")
+    return await managed_schedule_list()
+
+
+@app.post("/api/schedules/{schedule_id}/run", response_model=ManagedScheduleList)
+async def run_schedule_now(schedule_id: str) -> ManagedScheduleList:
+    raw = state_database.get_schedule(schedule_id)
+    if raw is None:
+        raise HTTPException(status_code=404, detail="Schedule not found.")
+    status = await get_raw_prefill_status()
+    if status.running:
+        raise HTTPException(status_code=409, detail="A prefill is already running.")
+    run_at = utc_now()
+    try:
+        result = await launch_prefill_job()
+    except Exception as exc:
+        state_database.update_schedule_runtime(
+            schedule_id, last_run_at=run_at, last_result=f"Manual run failed: {exc}"
+        )
+        raise
+    state_database.update_schedule_runtime(
+        schedule_id,
+        last_run_at=run_at,
+        last_result=f"Manual run started job {result.status.job_id or 'successfully'}.",
+    )
+    state_database.append_event(
+        "schedule.manual_run",
+        job_id=result.status.job_id,
+        payload={"schedule_id": schedule_id, "name": raw["name"]},
+    )
+    return await managed_schedule_list()
 
 
 @app.get("/api/diagnostics", response_model=DiagnosticsResult)

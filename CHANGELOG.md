@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.7.4
+
+- Added persistent CacheDeck-managed schedules with create, edit, enable/disable and remove controls.
+- Added multiple named cron schedules with per-schedule timezone, next run, last result and run-now action.
+- Added a server-side schedule worker that records started, skipped and failed schedule events.
+- Kept target-container schedule detection visible with a duplicate-schedule warning.
+- Added explicit **Select all**, **Select visible** and **Deselect all** controls in the Games tab.
+- Added schedule schema migration, CRUD persistence and cron validation tests.
+- Extended the Docker HTTP smoke test to exercise schedule creation and deletion.
+
 ## 0.7.3
 
 - Renamed the misleading **Not downloaded** state to **Unverified**.

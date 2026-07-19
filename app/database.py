@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 EVENT_RETENTION = 50_000
 
 
@@ -158,6 +158,21 @@ class StateDatabase:
                         payload TEXT NOT NULL,
                         PRIMARY KEY(provider, app_id, depot_id, manifest_id, branch)
                     );
+
+                    CREATE TABLE IF NOT EXISTS schedules (
+                        schedule_id TEXT PRIMARY KEY,
+                        name TEXT NOT NULL,
+                        expression TEXT NOT NULL,
+                        timezone TEXT NOT NULL,
+                        enabled INTEGER NOT NULL DEFAULT 1,
+                        last_trigger_key TEXT,
+                        last_run_at TEXT,
+                        last_result TEXT,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_schedules_enabled
+                        ON schedules(enabled, name COLLATE NOCASE);
                     """
                 )
                 current_row = connection.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
@@ -174,6 +189,20 @@ class StateDatabase:
                         "ON events(event_type, id DESC)"
                     )
                     current_version = 2
+                if current_version < 3:
+                    connection.execute(
+                        "CREATE TABLE IF NOT EXISTS schedules ("
+                        "schedule_id TEXT PRIMARY KEY, name TEXT NOT NULL, "
+                        "expression TEXT NOT NULL, timezone TEXT NOT NULL, "
+                        "enabled INTEGER NOT NULL DEFAULT 1, last_trigger_key TEXT, "
+                        "last_run_at TEXT, last_result TEXT, created_at TEXT NOT NULL, "
+                        "updated_at TEXT NOT NULL)"
+                    )
+                    connection.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_schedules_enabled "
+                        "ON schedules(enabled, name COLLATE NOCASE)"
+                    )
+                    current_version = 3
                 connection.execute(
                     "INSERT INTO meta(key, value) VALUES('schema_version', ?) "
                     "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -592,6 +621,135 @@ class StateDatabase:
             for job_id in set(previous) - next_ids:
                 connection.execute("DELETE FROM jobs WHERE job_id = ?", (job_id,))
 
+    def list_schedules(self) -> list[dict[str, Any]]:
+        self.initialize()
+        with self._lock, self.connection() as connection:
+            rows = connection.execute(
+                "SELECT schedule_id, name, expression, timezone, enabled, "
+                "last_trigger_key, last_run_at, last_result, created_at, updated_at "
+                "FROM schedules ORDER BY name COLLATE NOCASE"
+            ).fetchall()
+        return [
+            {
+                "schedule_id": str(row["schedule_id"]),
+                "name": str(row["name"]),
+                "expression": str(row["expression"]),
+                "timezone": str(row["timezone"]),
+                "enabled": bool(row["enabled"]),
+                "last_trigger_key": row["last_trigger_key"],
+                "last_run_at": row["last_run_at"],
+                "last_result": row["last_result"],
+                "created_at": str(row["created_at"]),
+                "updated_at": str(row["updated_at"]),
+            }
+            for row in rows
+        ]
+
+    def get_schedule(self, schedule_id: str) -> dict[str, Any] | None:
+        self.initialize()
+        with self._lock, self.connection() as connection:
+            row = connection.execute(
+                "SELECT schedule_id, name, expression, timezone, enabled, "
+                "last_trigger_key, last_run_at, last_result, created_at, updated_at "
+                "FROM schedules WHERE schedule_id = ?",
+                (schedule_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "schedule_id": str(row["schedule_id"]),
+            "name": str(row["name"]),
+            "expression": str(row["expression"]),
+            "timezone": str(row["timezone"]),
+            "enabled": bool(row["enabled"]),
+            "last_trigger_key": row["last_trigger_key"],
+            "last_run_at": row["last_run_at"],
+            "last_result": row["last_result"],
+            "created_at": str(row["created_at"]),
+            "updated_at": str(row["updated_at"]),
+        }
+
+    def upsert_schedule(
+        self,
+        *,
+        schedule_id: str,
+        name: str,
+        expression: str,
+        timezone_name: str,
+        enabled: bool,
+    ) -> dict[str, Any]:
+        self.initialize()
+        now = utc_now()
+        with self._lock, self.connection() as connection:
+            previous = connection.execute(
+                "SELECT created_at FROM schedules WHERE schedule_id = ?",
+                (schedule_id,),
+            ).fetchone()
+            created_at = str(previous["created_at"]) if previous else now
+            connection.execute(
+                "INSERT INTO schedules(schedule_id, name, expression, timezone, enabled, "
+                "created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(schedule_id) DO UPDATE SET name=excluded.name, "
+                "expression=excluded.expression, timezone=excluded.timezone, "
+                "enabled=excluded.enabled, updated_at=excluded.updated_at",
+                (schedule_id, name, expression, timezone_name, 1 if enabled else 0, created_at, now),
+            )
+            self.append_event(
+                "schedule.updated" if previous else "schedule.created",
+                payload={
+                    "schedule_id": schedule_id,
+                    "name": name,
+                    "expression": expression,
+                    "timezone": timezone_name,
+                    "enabled": enabled,
+                },
+                connection=connection,
+            )
+        result = self.get_schedule(schedule_id)
+        assert result is not None
+        return result
+
+    def update_schedule_runtime(
+        self,
+        schedule_id: str,
+        *,
+        last_trigger_key: str | None = None,
+        last_run_at: str | None = None,
+        last_result: str | None = None,
+    ) -> dict[str, Any] | None:
+        self.initialize()
+        with self._lock, self.connection() as connection:
+            current = connection.execute(
+                "SELECT schedule_id FROM schedules WHERE schedule_id = ?",
+                (schedule_id,),
+            ).fetchone()
+            if current is None:
+                return None
+            connection.execute(
+                "UPDATE schedules SET last_trigger_key = COALESCE(?, last_trigger_key), "
+                "last_run_at = COALESCE(?, last_run_at), "
+                "last_result = COALESCE(?, last_result), updated_at = ? "
+                "WHERE schedule_id = ?",
+                (last_trigger_key, last_run_at, last_result, utc_now(), schedule_id),
+            )
+        return self.get_schedule(schedule_id)
+
+    def delete_schedule(self, schedule_id: str) -> dict[str, Any] | None:
+        existing = self.get_schedule(schedule_id)
+        if existing is None:
+            return None
+        with self._lock, self.connection() as connection:
+            connection.execute("DELETE FROM schedules WHERE schedule_id = ?", (schedule_id,))
+            self.append_event(
+                "schedule.deleted",
+                payload={
+                    "schedule_id": schedule_id,
+                    "name": existing["name"],
+                },
+                connection=connection,
+            )
+        return existing
+
     def upsert_depot(
         self,
         *,
@@ -678,7 +836,7 @@ class StateDatabase:
         self.initialize()
         with self._lock, self.connection() as connection:
             result: dict[str, int] = {}
-            for table in ("games", "queue_items", "jobs", "events", "depots", "manifests"):
+            for table in ("games", "queue_items", "jobs", "events", "depots", "manifests", "schedules"):
                 result[table] = int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
             return result
 
