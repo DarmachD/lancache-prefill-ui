@@ -27,7 +27,7 @@ jobs:
         run: docker build --build-arg VERSION="$(tr -d '[:space:]' < VERSION)" -t cachedeck:test .
 
       - name: Run unit tests in image
-        run: docker run --rm -v "${PWD}/tests:/app/tests:ro" cachedeck:test python -m unittest discover -s tests -v
+        run: docker run --rm -v "${PWD}/tests:/app/tests:ro" cachedeck:test python -W error::ResourceWarning -m unittest discover -s tests -v
 
       - name: Verify embedded Steam engine
         run: docker run --rm cachedeck:test /opt/steamprefill/SteamPrefill --version

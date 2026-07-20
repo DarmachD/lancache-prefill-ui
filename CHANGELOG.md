@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.8.1
+
+- Fixed fast cached or already-current targeted checks being falsely reported as `SteamPrefill did not confirm that the detached job started`.
+- Replaced the detached-process lifetime probe with an explicit wrapper-ready handshake and made the wrapper own its PID file, removing the short-job PID race.
+- Added automatic recovery for v0.8.0 queue items that were marked failed even though the embedded wrapper recorded a successful exit.
+- Added structured in-memory parsing of interactive **Select games** terminal output so observed downloads immediately update the Games tab.
+- Kept raw terminal transcripts out of persistent storage to avoid retaining Steam login or Steam Guard input.
+- Throttled interactive progress persistence to reduce unnecessary SQLite writes while retaining immediate completion events.
+- Improved detached-start failure messages with the actual readiness/exit reason.
+- Preserved Steam app IDs and the active provider when a status table omits its App ID column.
+- Closed SQLite backup connections explicitly and made ResourceWarnings fail the CI test suite.
+- Added end-to-end tests for a near-instant embedded targeted check, false-failure recovery and Biped-style interactive completion output.
+
 ## 0.8.0
 
 - Added the `embedded-steam` provider and made it the default.

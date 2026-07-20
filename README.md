@@ -34,6 +34,7 @@ CacheDeck to control an existing external SteamPrefill container.
 - Persistent SQLite catalogue, queue, history, schedules and activity
 - Multiple editable timezone-aware cron schedules
 - Reconnectable live logs and an on-demand interactive terminal
+- Interactive selector downloads are folded back into structured Games status without persisting the raw terminal transcript
 - Historical log scanning and manual verification overrides
 - Database backup, repair and installation diagnostics
 - Same-origin protection for WebSockets and state-changing HTTP requests

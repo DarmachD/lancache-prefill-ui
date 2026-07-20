@@ -14,8 +14,10 @@ import subprocess
 import socket
 import termios
 import threading
+import time
 import uuid
 from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Final, Literal
@@ -45,6 +47,7 @@ from app.library import (
     output_indicates_successful_prefill,
     clean_terminal_output,
     parse_size_bytes,
+    normalise_name,
     placeholder_game_name,
     is_placeholder_game_name,
     resolve_steam_metadata,
@@ -419,6 +422,154 @@ library_store = SQLiteLibraryStore(state_database)
 queue_store = SQLiteQueueStore(state_database)
 
 
+def _terminal_name_key(value: str) -> str:
+    return normalise_name(value)
+
+
+@dataclass
+class TerminalActivityTracker:
+    """Convert interactive engine output into structured game state.
+
+    The terminal transcript is deliberately kept only in memory so Steam login
+    prompts and Steam Guard input are never written to disk. Only structured
+    game progress/completion evidence is persisted.
+    """
+
+    session_id: str
+    active_app: str | None = None
+    seen_completed: set[str] = field(default_factory=set)
+    seen_up_to_date: set[str] = field(default_factory=set)
+    seen_failed: set[str] = field(default_factory=set)
+    last_fingerprint: str | None = None
+    last_live_write: float = 0.0
+
+    def observe(self, output: str) -> bool:
+        snapshot = parse_progress_snapshot(output, initial_app_name=self.active_app)
+        if snapshot.app_name:
+            self.active_app = snapshot.app_name
+
+        known_names = {
+            _terminal_name_key(game.name) for game in library_store.list_games()
+        }
+        new_completed = [
+            name
+            for name in snapshot.completed_for
+            if _terminal_name_key(name) not in self.seen_completed
+            and _terminal_name_key(name) in known_names
+        ]
+        new_up_to_date = [
+            name
+            for name in snapshot.up_to_date_for
+            if _terminal_name_key(name) not in self.seen_up_to_date
+            and _terminal_name_key(name) in known_names
+        ]
+        new_failed = [
+            name
+            for name in snapshot.failed_for
+            if _terminal_name_key(name) not in self.seen_failed
+            and _terminal_name_key(name) in known_names
+        ]
+
+        active_key = _terminal_name_key(self.active_app or "")
+        final_keys = {
+            *(_terminal_name_key(name) for name in new_completed),
+            *(_terminal_name_key(name) for name in new_up_to_date),
+            *(_terminal_name_key(name) for name in new_failed),
+        }
+        live_progress = bool(
+            self.active_app
+            and active_key in known_names
+            and snapshot.progress is not None
+            and snapshot.progress < 100
+            and active_key not in self.seen_completed
+            and active_key not in self.seen_up_to_date
+            and active_key not in self.seen_failed
+        )
+        current_is_new_final = bool(active_key and active_key in final_keys)
+        if not (live_progress or new_completed or new_up_to_date or new_failed):
+            return False
+        now_monotonic = time.monotonic()
+        if (
+            live_progress
+            and not (new_completed or new_up_to_date or new_failed)
+            and now_monotonic - self.last_live_write < 1.0
+        ):
+            return False
+
+        completed_keys = {_terminal_name_key(name) for name in new_completed}
+        filtered = snapshot.model_copy(
+            update={
+                "app_name": self.active_app if live_progress or current_is_new_final else None,
+                "progress": snapshot.progress if live_progress or current_is_new_final else None,
+                "downloaded": snapshot.downloaded if live_progress or current_is_new_final else None,
+                "total": snapshot.total if live_progress or current_is_new_final else None,
+                "speed": snapshot.speed if live_progress else None,
+                "eta": snapshot.eta if live_progress else None,
+                "completed_for": new_completed,
+                "up_to_date_for": new_up_to_date,
+                "failed_for": new_failed,
+                "downloaded_for": {
+                    name: value
+                    for name, value in snapshot.downloaded_for.items()
+                    if _terminal_name_key(name) in completed_keys
+                },
+                "total_for": {
+                    name: value
+                    for name, value in snapshot.total_for.items()
+                    if _terminal_name_key(name) in completed_keys
+                },
+            }
+        )
+        fingerprint = json.dumps(filtered.model_dump(mode="json"), sort_keys=True)
+        if fingerprint == self.last_fingerprint:
+            return False
+        self.last_fingerprint = fingerprint
+        if live_progress:
+            self.last_live_write = now_monotonic
+
+        library_store.apply_progress(filtered, full_run=False, job_id=self.session_id)
+        now = utc_now()
+        for name in new_completed:
+            state_database.append_event(
+                "provider.game_completed",
+                provider=provider.provider_id,
+                job_id=self.session_id,
+                payload={
+                    "name": name,
+                    "downloaded": snapshot.downloaded_for.get(name),
+                    "source": "interactive_terminal",
+                    "observed_at": now,
+                },
+            )
+        for name in new_up_to_date:
+            state_database.append_event(
+                "provider.game_verified",
+                provider=provider.provider_id,
+                job_id=self.session_id,
+                payload={
+                    "name": name,
+                    "source": "interactive_terminal",
+                    "observed_at": now,
+                },
+            )
+        for name in new_failed:
+            state_database.append_event(
+                "provider.game_failed",
+                provider=provider.provider_id,
+                job_id=self.session_id,
+                payload={
+                    "name": name,
+                    "source": "interactive_terminal",
+                    "observed_at": now,
+                },
+            )
+
+        self.seen_completed.update(_terminal_name_key(name) for name in new_completed)
+        self.seen_up_to_date.update(_terminal_name_key(name) for name in new_up_to_date)
+        self.seen_failed.update(_terminal_name_key(name) for name in new_failed)
+        return True
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -428,7 +579,6 @@ def parse_int(value: str | None) -> int | None:
         return int(value) if value not in {None, ""} else None
     except (TypeError, ValueError):
         return None
-
 
 
 
@@ -894,6 +1044,7 @@ set +e
 state_dir={state_dir}
 log_file="$state_dir/prefill.log"
 pid_file="$state_dir/prefill.pid"
+ready_file="$state_dir/prefill.ready"
 exit_file="$state_dir/prefill.exit"
 finished_file="$state_dir/prefill.finished"
 child_pid=""
@@ -903,8 +1054,10 @@ finish_job() {{
     finished_at="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
     printf '%s\\n' "$finished_at" > "$finished_file"
     printf '%s\\n' "$code" > "$exit_file"
-    rm -f "$pid_file"
-    printf '\\n[%s] CacheDeck prefill finished with exit code %s.\\n' \
+    if [ "$(cat "$pid_file" 2>/dev/null || true)" = "$$" ]; then
+        rm -f "$pid_file"
+    fi
+    printf '\\n[%s] CacheDeck prefill finished with exit code %s.\\n' \\
         "$finished_at" "$code"
 }}
 
@@ -924,6 +1077,12 @@ exec >> "$log_file" 2>&1
 printf '[%s] CacheDeck job {job_id} started.\\n' {shlex.quote(started_at)}
 cd {prefill_dir} || exit 127
 
+# The wrapper owns its PID file. This avoids a race where a very short Steam
+# check exits and removes the file before the parent has written it.
+printf '%s\\n' "$$" > "$pid_file.tmp" || exit 126
+mv "$pid_file.tmp" "$pid_file" || exit 126
+printf '%s\\n' {shlex.quote(job_id)} > "$ready_file" || exit 126
+
 {command} &
 child_pid="$!"
 wait "$child_pid"
@@ -942,6 +1101,7 @@ def build_start_command(job_id: str, started_at: str, command: str) -> str:
 set -u
 state_dir={state_dir}
 pid_file="$state_dir/prefill.pid"
+ready_file="$state_dir/prefill.ready"
 job_file="$state_dir/prefill.job"
 started_file="$state_dir/prefill.started"
 finished_file="$state_dir/prefill.finished"
@@ -982,23 +1142,33 @@ done
 
 printf '%s' {wrapper_script} > "$wrapper_file"
 chmod 700 "$wrapper_file"
-rm -f "$exit_file" "$finished_file"
+rm -f "$pid_file" "$pid_file.tmp" "$ready_file" "$exit_file" "$finished_file"
 printf '%s\\n' {shlex.quote(job_id)} > "$job_file"
 printf '%s\\n' {shlex.quote(started_at)} > "$started_file"
 : > "$log_file"
 
 nohup bash "$wrapper_file" >/dev/null 2>&1 </dev/null &
 pid="$!"
-printf '%s\\n' "$pid" > "$pid_file.tmp"
-mv "$pid_file.tmp" "$pid_file"
 
-sleep 0.15
-if ! kill -0 "$pid" 2>/dev/null; then
-    printf 'FAILED\\0%s\\0' "$pid"
-    exit 1
-fi
+# Wait for the wrapper's explicit ready handshake, not merely for its process to
+# remain alive. A cached or already-current game can finish in a few milliseconds
+# and was previously misreported as a failed detached launch.
+for _ in $(seq 1 250); do
+    ready_job="$(cat "$ready_file" 2>/dev/null || true)"
+    if [ "$ready_job" = {shlex.quote(job_id)} ]; then
+        printf 'STARTED\\0%s\\0%s\\0' {shlex.quote(job_id)} "$pid"
+        exit 0
+    fi
+    if [ -r "$exit_file" ]; then
+        exit_code="$(cat "$exit_file" 2>/dev/null || true)"
+        printf 'FAILED\\0%s\\0%s\\0' "$exit_code" "$pid"
+        exit 1
+    fi
+    sleep 0.02
+done
 
-printf 'STARTED\\0%s\\0%s\\0' {shlex.quote(job_id)} "$pid"
+printf 'FAILED\\0NO_READY\\0%s\\0' "$pid"
+exit 1
 """.strip()
 
 
@@ -1049,22 +1219,29 @@ async def launch_prefill_job(
         history_store.update(job_id, state="failed", finished_at=utc_now(), message=str(exc))
         raise HTTPException(status_code=500, detail=f"Unable to run the active provider: {exc}") from exc
 
-    marker = result.stdout.split("\0", 1)[0]
+    start_fields = result.stdout.split("\0")
+    marker = start_fields[0] if start_fields else ""
     if result.returncode != 0 or marker != "STARTED":
+        failure_detail = result.stderr.strip()
+        if not failure_detail and marker == "FAILED":
+            reason = start_fields[1] if len(start_fields) > 1 else ""
+            if reason == "NO_READY":
+                failure_detail = "The detached wrapper did not become ready within five seconds."
+            elif reason:
+                failure_detail = f"The detached wrapper exited before it became ready (exit code {reason})."
+        if not failure_detail:
+            failure_detail = marker or "Detached start failed."
         history_store.update(
             job_id,
             state="failed",
             finished_at=utc_now(),
-            message=result.stderr.strip() or marker or "Detached start failed.",
+            message=failure_detail,
         )
         if marker in {"ALREADY_RUNNING", "EXTERNAL_RUNNING"}:
             raise HTTPException(status_code=409, detail="A SteamPrefill job started before CacheDeck could launch this one.")
         if marker == "LOCKED":
             raise HTTPException(status_code=409, detail="Another start request is already being processed.")
-        raise HTTPException(
-            status_code=500,
-            detail=result.stderr.strip() or "SteamPrefill did not confirm that the detached job started.",
-        )
+        raise HTTPException(status_code=500, detail=failure_detail)
 
     await asyncio.sleep(0.2)
     status = await get_prefill_status()
@@ -1621,6 +1798,45 @@ async def reconcile_provider_downloaded_state() -> int:
     return changed
 
 
+def merge_status_apps_with_config_ids(
+    selected: list[SelectedApp], app_ids: list[int]
+) -> list[SelectedApp]:
+    """Preserve app IDs when a SteamPrefill status table omits its ID column."""
+    existing_by_name = {
+        normalise_name(game.name): game.app_id
+        for game in library_store.list_games()
+        if game.app_id is not None
+    }
+    used_ids = {app.app_id for app in selected if app.app_id is not None}
+    merged: list[SelectedApp] = []
+    unresolved_indexes: list[int] = []
+
+    for app in selected:
+        app_id = app.app_id
+        if app_id is None:
+            candidate = existing_by_name.get(normalise_name(app.name))
+            if candidate is not None and candidate not in used_ids:
+                app_id = candidate
+                used_ids.add(candidate)
+        if app_id is None:
+            unresolved_indexes.append(len(merged))
+        merged.append(
+            app.model_copy(
+                update={
+                    "provider": provider.provider_id,
+                    "app_id": app_id,
+                }
+            )
+        )
+
+    remaining_ids = [app_id for app_id in app_ids if app_id not in used_ids]
+    if unresolved_indexes and len(unresolved_indexes) == len(remaining_ids):
+        for index, app_id in zip(unresolved_indexes, remaining_ids, strict=True):
+            merged[index] = merged[index].model_copy(update={"app_id": app_id})
+
+    return merged
+
+
 def selected_apps_from_ids(app_ids: list[int]) -> list[GameRecord]:
     existing = {
         game.app_id: game
@@ -1680,6 +1896,7 @@ async def refresh_selected_library() -> tuple[list[GameRecord], str]:
     if status_result is not None:
         selected = parse_selected_apps_status(status_result.stdout) if status_result.returncode == 0 else []
         if selected:
+            selected = merge_status_apps_with_config_ids(selected, app_ids)
             games = library_store.replace_selected(selected, utc_now())
             await reconcile_provider_downloaded_state()
             start_metadata_refresh()
@@ -1987,7 +2204,48 @@ async def sync_library_activity(*, deep_scan: bool = False) -> None:
     if latest.state == "completed" and latest.scope == "full":
         library_store.mark_all_downloaded(latest.job_id, latest.finished_at or utc_now())
 
-    running_item = next((item for item in queue_store.list() if item.state == "running"), None)
+    queue_items = queue_store.list()
+    running_item = next((item for item in queue_items if item.state == "running"), None)
+    if (
+        (running_item is None or running_item.job_id != latest.job_id)
+        and latest.state == "completed"
+        and latest.scope == "single"
+        and latest.app_id is not None
+    ):
+        # v0.8.0 could falsely report a very fast cached/up-to-date check as a
+        # detached-start failure. The wrapper still recorded exit code 0, so
+        # recover the matching queue item when that successful state is later
+        # observed. This also repairs existing installations after upgrade.
+        false_failure = next(
+            (
+                item
+                for item in reversed(queue_items)
+                if item.app_id == latest.app_id
+                and item.state == "failed"
+                and not item.job_id
+                and "did not confirm" in item.message.casefold()
+            ),
+            None,
+        )
+        if false_failure is not None:
+            running_item = queue_store.update(
+                false_failure.queue_id,
+                state="running",
+                job_id=latest.job_id,
+                finished_at=None,
+                message="Recovered a successful fast check that v0.8.0 misreported as failed.",
+            )
+            state_database.append_event(
+                "queue.false_failure_recovered",
+                provider=provider.provider_id,
+                app_id=latest.app_id,
+                job_id=latest.job_id,
+                payload={
+                    "queue_id": false_failure.queue_id,
+                    "name": false_failure.app_name,
+                },
+            )
+
     if not running_item or running_item.job_id != latest.job_id:
         return
 
@@ -3106,10 +3364,46 @@ async def terminal(websocket: WebSocket) -> None:
 
     os.close(slave_fd)
 
+    activity_tracker = TerminalActivityTracker(
+        session_id=f"terminal-{uuid.uuid4().hex}"
+    )
+    activity_buffer = ""
+    selection_refresh_task: asyncio.Task[None] | None = None
+
+    async def refresh_terminal_selection() -> None:
+        """Load the selector's saved app IDs without starting a manifest scan."""
+        nonlocal activity_buffer
+        for delay in (0.2, 0.5, 1.0):
+            await asyncio.sleep(delay)
+            try:
+                app_ids = await read_selected_app_ids_from_config()
+            except (OSError, subprocess.TimeoutExpired):
+                app_ids = []
+            if not app_ids:
+                continue
+            selected_apps_from_ids(app_ids)
+            start_metadata_refresh()
+            # Give the metadata worker a short chance to replace app-ID
+            # placeholders with the exact game names printed by SteamPrefill.
+            if metadata_refresh_task is not None and not metadata_refresh_task.done():
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(
+                        asyncio.shield(metadata_refresh_task), timeout=8
+                    )
+            # Re-run the in-memory evidence after the selected library exists.
+            # This is useful when a very small game finishes immediately after
+            # the selector writes its config file.
+            with contextlib.suppress(Exception):
+                activity_tracker.observe(activity_buffer)
+            return
+
     async def pump_output() -> None:
+        nonlocal activity_buffer, selection_refresh_task
         loop = asyncio.get_running_loop()
         while process.poll() is None:
-            ready, _, _ = await loop.run_in_executor(None, lambda: select.select([master_fd], [], [], 0.2))
+            ready, _, _ = await loop.run_in_executor(
+                None, lambda: select.select([master_fd], [], [], 0.2)
+            )
             if not ready:
                 continue
             try:
@@ -3118,6 +3412,34 @@ async def terminal(websocket: WebSocket) -> None:
                 break
             if not data:
                 break
+
+            decoded = data.decode("utf-8", errors="replace")
+            # Keep only a bounded in-memory tail. Never persist the raw terminal
+            # transcript because it can contain Steam login/Guard input.
+            activity_buffer = (activity_buffer + decoded)[-120_000:]
+            lowered = decoded.casefold()
+            if (
+                "selected " in lowered
+                and "apps to prefill" in lowered
+                and (selection_refresh_task is None or selection_refresh_task.done())
+            ):
+                selection_refresh_task = asyncio.create_task(
+                    refresh_terminal_selection()
+                )
+            if any(
+                token in lowered
+                for token in (
+                    "starting ",
+                    "finished downloading",
+                    "already up to date",
+                    "update available",
+                    "download failed",
+                    "%",
+                )
+            ):
+                with contextlib.suppress(Exception):
+                    activity_tracker.observe(activity_buffer)
+
             try:
                 await websocket.send_bytes(data)
             except RuntimeError:
@@ -3158,5 +3480,10 @@ async def terminal(websocket: WebSocket) -> None:
         output_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await output_task
+        if selection_refresh_task is not None:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await selection_refresh_task
+        with contextlib.suppress(Exception):
+            activity_tracker.observe(activity_buffer)
         with contextlib.suppress(OSError):
             os.close(master_fd)

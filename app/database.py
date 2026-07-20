@@ -5,7 +5,7 @@ import sqlite3
 import re
 import unicodedata
 import threading
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
@@ -469,8 +469,13 @@ class StateDatabase:
     def backup_to(self, destination: Path) -> dict[str, Any]:
         self.initialize()
         destination.parent.mkdir(parents=True, exist_ok=True)
-        with self._lock, sqlite3.connect(self.path) as source, sqlite3.connect(destination) as target:
+        with (
+            self._lock,
+            closing(sqlite3.connect(self.path)) as source,
+            closing(sqlite3.connect(destination)) as target,
+        ):
             source.backup(target)
+            target.commit()
         size = destination.stat().st_size
         completed_at = utc_now()
         self.set_meta("database.last_backup_at", completed_at)
