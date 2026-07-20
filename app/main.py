@@ -45,6 +45,7 @@ from app.library import (
     parse_selected_apps_status,
     parse_successfully_downloaded_app_ids,
     output_indicates_successful_prefill,
+    output_indicates_transient_steam_metadata_failure,
     clean_terminal_output,
     parse_size_bytes,
     normalise_name,
@@ -55,6 +56,14 @@ from app.library import (
 )
 
 APP_NAME: Final = "CacheDeck"
+
+
+def bounded_env_int(name: str, default: int, minimum: int, maximum: int) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+    except ValueError:
+        value = default
+    return max(minimum, min(maximum, value))
 
 
 def read_packaged_version() -> str:
@@ -157,7 +166,13 @@ else:
         if _raw_prefill_state_dir in {"", "/config/steam-engine/state"}
         else _raw_prefill_state_dir
     )
-HISTORY_LIMIT: Final = max(5, min(100, int(os.getenv("HISTORY_LIMIT", "20"))))
+HISTORY_LIMIT: Final = bounded_env_int("HISTORY_LIMIT", 20, 5, 100)
+STEAM_METADATA_MAX_ATTEMPTS: Final = bounded_env_int(
+    "CACHEDECK_STEAM_METADATA_ATTEMPTS", 3, 1, 5
+)
+STEAM_METADATA_RETRY_BASE_SECONDS: Final = bounded_env_int(
+    "CACHEDECK_STEAM_METADATA_RETRY_SECONDS", 5, 0, 60
+)
 AUTO_RESUME_INTERRUPTED: Final = os.getenv(
     "AUTO_RESUME_INTERRUPTED", "false"
 ).strip().lower() in {"1", "true", "yes", "on"}
@@ -1052,11 +1067,13 @@ child_pid=""
 finish_job() {{
     code="$?"
     finished_at="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
-    printf '%s\\n' "$finished_at" > "$finished_file"
-    printf '%s\\n' "$code" > "$exit_file"
+    # Remove the live PID before publishing the finished/exit markers. Readers
+    # can then treat the exit marker as an atomic completed state.
     if [ "$(cat "$pid_file" 2>/dev/null || true)" = "$$" ]; then
         rm -f "$pid_file"
     fi
+    printf '%s\\n' "$finished_at" > "$finished_file"
+    printf '%s\\n' "$code" > "$exit_file"
     printf '\\n[%s] CacheDeck prefill finished with exit code %s.\\n' \\
         "$finished_at" "$code"
 }}
@@ -1083,10 +1100,42 @@ printf '%s\\n' "$$" > "$pid_file.tmp" || exit 126
 mv "$pid_file.tmp" "$pid_file" || exit 126
 printf '%s\\n' {shlex.quote(job_id)} > "$ready_file" || exit 126
 
-{command} &
-child_pid="$!"
-wait "$child_pid"
-exit "$?"
+attempt=1
+max_attempts={STEAM_METADATA_MAX_ATTEMPTS}
+retry_base_seconds={STEAM_METADATA_RETRY_BASE_SECONDS}
+attempt_log="$state_dir/prefill-attempt.log"
+
+while true; do
+    start_size="$(wc -c < "$log_file" 2>/dev/null || printf '0')"
+    printf '[%s] CacheDeck Steam attempt %s/%s.\n' \
+        "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$attempt" "$max_attempts"
+
+    {command} &
+    child_pid="$!"
+    wait "$child_pid"
+    code="$?"
+    child_pid=""
+
+    if [ "$code" -eq 0 ]; then
+        rm -f "$attempt_log"
+        exit 0
+    fi
+
+    tail -c "+$((start_size + 1))" "$log_file" > "$attempt_log" 2>/dev/null || true
+    if [ "$attempt" -lt "$max_attempts" ] && grep -Eqi \
+        'Unable to load latest App metadata|TaskCanceledException|A task was canceled|transient errors with the Steam network|AppInfoRequestAsync' \
+        "$attempt_log"; then
+        delay="$((attempt * retry_base_seconds))"
+        printf '[%s] Steam metadata request failed transiently; retrying in %s seconds.\n' \
+            "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$delay"
+        if [ "$delay" -gt 0 ]; then sleep "$delay"; fi
+        attempt="$((attempt + 1))"
+        continue
+    fi
+
+    rm -f "$attempt_log"
+    exit "$code"
+done
 """
 
 
@@ -2305,6 +2354,57 @@ async def sync_library_activity(*, deep_scan: bool = False) -> None:
         )
     elif latest.state in {"failed", "stopped", "interrupted"}:
         finished = latest.finished_at or utc_now()
+        transient_metadata_failure = False
+        if latest.state == "failed":
+            try:
+                failed_output = await read_current_prefill_output()
+                transient_metadata_failure = output_indicates_transient_steam_metadata_failure(
+                    failed_output
+                )
+            except Exception:
+                failed_output = ""
+
+        if transient_metadata_failure:
+            existing_game = next(
+                (game for game in library_store.list_games() if game.app_id == running_item.app_id),
+                None,
+            )
+            previously_verified = bool(
+                existing_game
+                and (existing_game.verified_at or existing_game.verification_source)
+            )
+            friendly_message = (
+                "Steam's app-metadata request timed out after automatic retries. "
+                "CacheDeck did not change the game's known cache status; retry later."
+            )
+            queue_store.update(
+                running_item.queue_id,
+                state="failed",
+                finished_at=finished,
+                message=friendly_message,
+            )
+            library_store.update_by_app_id(
+                running_item.app_id,
+                status=("downloaded" if previously_verified else "selected"),
+                progress=(100.0 if previously_verified else None),
+                queue_position=None,
+                speed=None,
+                eta=None,
+                message=friendly_message,
+            )
+            state_database.append_event(
+                "provider.steam_metadata_deferred",
+                provider=provider.provider_id,
+                app_id=running_item.app_id,
+                job_id=latest.job_id,
+                payload={
+                    "name": running_item.app_name,
+                    "attempts": STEAM_METADATA_MAX_ATTEMPTS,
+                    "cache_status_preserved": previously_verified,
+                },
+            )
+            return
+
         queue_store.update(
             running_item.queue_id,
             state="failed",
@@ -3369,6 +3469,7 @@ async def terminal(websocket: WebSocket) -> None:
     )
     activity_buffer = ""
     selection_refresh_task: asyncio.Task[None] | None = None
+    transient_warning_sent = False
 
     async def refresh_terminal_selection() -> None:
         """Load the selector's saved app IDs without starting a manifest scan."""
@@ -3398,7 +3499,7 @@ async def terminal(websocket: WebSocket) -> None:
             return
 
     async def pump_output() -> None:
-        nonlocal activity_buffer, selection_refresh_task
+        nonlocal activity_buffer, selection_refresh_task, transient_warning_sent
         loop = asyncio.get_running_loop()
         while process.poll() is None:
             ready, _, _ = await loop.run_in_executor(
@@ -3418,14 +3519,29 @@ async def terminal(websocket: WebSocket) -> None:
             # transcript because it can contain Steam login/Guard input.
             activity_buffer = (activity_buffer + decoded)[-120_000:]
             lowered = decoded.casefold()
-            if (
-                "selected " in lowered
-                and "apps to prefill" in lowered
-                and (selection_refresh_task is None or selection_refresh_task.done())
+            selection_saved = "selected " in lowered and "apps to prefill" in lowered
+            transient_metadata_error = (
+                "unable to load latest app metadata" in lowered
+                or "transient errors with the steam network" in lowered
+                or ("taskcanceledexception" in lowered and "appinfo" in lowered)
+            )
+            if (selection_saved or transient_metadata_error) and (
+                selection_refresh_task is None or selection_refresh_task.done()
             ):
+                # SteamPrefill writes the selected-app config before its optional
+                # post-selection statistics scan. Recover that saved selection
+                # even when Steam's metadata service times out afterwards.
                 selection_refresh_task = asyncio.create_task(
                     refresh_terminal_selection()
                 )
+            if transient_metadata_error and not transient_warning_sent:
+                transient_warning_sent = True
+                with contextlib.suppress(RuntimeError):
+                    await websocket.send_text(
+                        "\r\n\x1b[33mCacheDeck: Steam's app-metadata request timed out. "
+                        "Any saved selection is being recovered automatically; "
+                        "no game has been marked as missing or failed.\x1b[0m\r\n"
+                    )
             if any(
                 token in lowered
                 for token in (
@@ -3480,9 +3596,14 @@ async def terminal(websocket: WebSocket) -> None:
         output_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await output_task
-        if selection_refresh_task is not None:
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await selection_refresh_task
+        if selection_refresh_task is None or selection_refresh_task.done():
+            # The selector can save selectedAppsToPrefill.json and then crash
+            # while printing Steam metadata statistics without emitting its
+            # normal "Selected N apps" confirmation. Always perform one final
+            # config recovery when the terminal session ends.
+            selection_refresh_task = asyncio.create_task(refresh_terminal_selection())
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await selection_refresh_task
         with contextlib.suppress(Exception):
             activity_tracker.observe(activity_buffer)
         with contextlib.suppress(OSError):

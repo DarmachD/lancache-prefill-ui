@@ -980,6 +980,33 @@ def output_indicates_successful_prefill(output: str) -> bool:
     return not FATAL_PREFILL_RE.search(text)
 
 
+TRANSIENT_STEAM_METADATA_RE = re.compile(
+    r"Unable to load latest App metadata|"
+    r"TaskCanceledException|"
+    r"A task was canceled|"
+    r"transient errors with the Steam network|"
+    r"AppInfoRequestAsync",
+    re.I,
+)
+
+
+def output_indicates_transient_steam_metadata_failure(output: str) -> bool:
+    """Identify SteamPrefill failures that are safe to retry.
+
+    These errors happen while Steam is serving app metadata and do not prove
+    that LANCache content is missing or corrupt.
+    """
+    text = clean_terminal_output(output)
+    if not TRANSIENT_STEAM_METADATA_RE.search(text):
+        return False
+    lowered = text.casefold()
+    return (
+        "unable to load latest app metadata" in lowered
+        or "transient errors with the steam network" in lowered
+        or ("taskcanceledexception" in lowered and "appinfo" in lowered)
+    )
+
+
 def resolve_steam_metadata_by_id(
     app_id: int,
     timeout: int = 8,

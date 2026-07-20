@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.8.2
+
+- Recovered `selectedAppsToPrefill.json` after SteamPrefill's interactive selector saves the selection but crashes during its optional post-selection app-metadata scan.
+- Added a clear terminal warning for transient Steam app-metadata timeouts without falsely marking games as missing or failed.
+- Added automatic retry of managed full and targeted prefills when SteamPrefill reports transient `TaskCanceledException`/AppInfo metadata failures.
+- Preserved the last verified game state when all automatic Steam metadata retries are exhausted; the queue reports a retryable Steam outage instead of changing a known-downloaded game to **Failed**.
+- Added structured `provider.steam_metadata_deferred` activity events for exhausted transient failures.
+- Made wrapper completion markers atomic by removing the live PID before publishing the exit marker.
+- Added bounded retry settings through `CACHEDECK_STEAM_METADATA_ATTEMPTS` and `CACHEDECK_STEAM_METADATA_RETRY_SECONDS`.
+- Added integration tests for retry-then-success, exhausted transient failure state preservation and selector metadata-timeout detection.
+
 ## 0.8.1
 
 - Fixed fast cached or already-current targeted checks being falsely reported as `SteamPrefill did not confirm that the detached job started`.

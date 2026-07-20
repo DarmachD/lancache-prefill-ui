@@ -8,6 +8,7 @@ from app.library import (
     QueueStore,
     SelectedApp,
     output_indicates_successful_prefill,
+    output_indicates_transient_steam_metadata_failure,
     parse_progress_snapshot,
     parse_selected_app_ids_config,
     parse_selected_apps_status,
@@ -56,6 +57,21 @@ Updated | Up To Date
 """
         self.assertTrue(output_indicates_successful_prefill(output))
         self.assertFalse(output_indicates_successful_prefill("Steam login failed"))
+
+
+    def test_recognises_transient_steam_metadata_timeout(self):
+        output = """
+Unable to load latest App metadata! An unexpected error occurred!
+This could possibly be due to transient errors with the Steam network.
+System.Threading.Tasks.TaskCanceledException: A task was canceled.
+   at SteamPrefill.Handlers.AppInfoHandler.AppInfoRequestAsync(List<uint> appIdsToLoad)
+"""
+        self.assertTrue(output_indicates_transient_steam_metadata_failure(output))
+        self.assertFalse(
+            output_indicates_transient_steam_metadata_failure(
+                "Lancache server is resolving to a public IP"
+            )
+        )
 
 
     def test_incremental_finished_line_uses_previous_active_game(self):
