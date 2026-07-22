@@ -100,7 +100,7 @@ jobs:
           assert engine["native_engine_ready"] is False
           assert engine["download_core"]["name"] == "SteamPrefill"
           assert engine["legacy_import_available"] is False
-          assert health["embedded_engine_version"] == "3.6.0"
+          assert health["embedded_engine_version"] == "3.6.1"
           assert health["docker_required"] is False
           assert engine["schema_version"] == health["schema_version"]
           assert schedules["schedules"] == []

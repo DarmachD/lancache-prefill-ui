@@ -34,7 +34,7 @@ CacheDeck v0.8 embeds the official SteamPrefill Linux binary as the transitional
 Steam download core for the `embedded-steam` provider.
 
 Project: https://github.com/tpill90/steam-lancache-prefill
-Pinned release: 3.6.0
+Pinned release: 3.6.1
 Copyright © the SteamPrefill contributors.
 
 SteamPrefill is licensed under the MIT License. Its executable is kept separate

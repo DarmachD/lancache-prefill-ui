@@ -14,7 +14,7 @@ is therefore no longer required for normal operation.
 This is a transitional engine rather than a direct SteamKit rewrite:
 
 - CacheDeck owns process execution, schedules, logs, queue and SQLite state.
-- SteamPrefill 3.6.0 remains the component which logs in to Steam, resolves
+- SteamPrefill 3.6.1 remains the component which logs in to Steam, resolves
   depots/manifests and sends downloads through LANCache.
 - The provider boundary remains in place so a future structured Steam worker can
   replace that core without another UI or database migration.
@@ -116,13 +116,16 @@ The image defaults to the new embedded provider. Existing CacheDeck database,
 game metadata, queue, run history and schedules remain in `/config/cachedeck.db`.
 
 CacheDeck attempts to seed the embedded engine's selected-app file from its own
-SQLite library when no embedded selection exists. On the Engine card, **Import
-old selection** can instead copy `selectedAppsToPrefill.json` from the former
-`LANCache-Prefill` container when the Docker socket is temporarily mounted.
+SQLite library when no embedded selection exists. On the Engine card,
+**Import old SteamPrefill state** can copy both
+`selectedAppsToPrefill.json` and `successfullyDownloadedDepots.json` from the
+former `LANCache-Prefill` container when the Docker socket is temporarily
+mounted. This preserves the old selected-game list and SteamPrefill
+depot/manifest history so an upgrade does not treat every selected game as a
+first-time prefill.
 
-The importer intentionally copies only selected app IDs. Steam credentials and
-session data are not copied from another container, so complete Steam login once
-inside CacheDeck.
+Steam credentials and session data are not copied from another container, so
+complete Steam login once inside CacheDeck.
 
 Recommended Unraid values:
 
@@ -137,10 +140,10 @@ CacheDeck recognises the exact v0.7 defaults and redirects them to the embedded
 paths automatically, but updating the template keeps the configuration clear.
 Custom legacy paths remain untouched.
 
-After importing the old selection, remove the Docker socket mapping unless it is
-still needed for another reason. Disable the old SteamPrefill container and its
-`GLOBAL_SCHEDULE` only after confirming the embedded engine can log in and run a
-test prefill.
+After importing the old SteamPrefill state, remove the Docker socket mapping
+unless it is still needed for another reason. Disable the old SteamPrefill
+container and its `GLOBAL_SCHEDULE` only after confirming the embedded engine
+can log in and run a test prefill.
 
 ## Legacy external-container provider
 
@@ -264,6 +267,6 @@ publishing.
 
 ## Third-party component
 
-The embedded beta packages the official SteamPrefill 3.6.0 Linux x64 release.
+The embedded beta packages the official SteamPrefill 3.6.1 Linux x64 release.
 SteamPrefill is MIT licensed. See `THIRD_PARTY_NOTICES.md` for attribution and
 licence text.
